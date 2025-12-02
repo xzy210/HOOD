@@ -9,8 +9,9 @@ This is a repository with training and inference code for the paper [**"HOOD: Hi
 
 ## Installation
 
+### Linux 系统安装
 
-### Install conda enviroment
+#### 使用 conda 环境文件安装
 We provide a conda environment file `hood.yml` to install all the dependencies. 
 You can create and activate the environment with the following commands:
 
@@ -21,7 +22,7 @@ conda activate hood
 
 If you want to build the environment from scratch, here are the necessary commands: 
 <details>
-  <summary>Build enviroment from scratch</summary>
+  <summary>Build enviroment from scratch (Linux)</summary>
 
 ```bash
 # Create and activate a new environment
@@ -49,6 +50,214 @@ pip install smplx aitviewer chumpy huepy
 # create a new kernel for jupyter notebook
 conda install ipykernel -y; python -m ipykernel install --user --name hood --display-name "hood"
 ```
+</details>
+
+---
+
+### Windows 系统安装
+
+由于原始的 `hood.yml` 是基于 Linux 系统配置的，Windows 用户需要按照以下步骤手动安装环境。
+
+**已验证的版本配置**（推荐）：
+| 组件 | 版本 |
+|-----|------|
+| Python | 3.10.x |
+| PyTorch | 2.4.0+cu118 |
+| CUDA | 11.8 |
+| torch-geometric | 2.3.0 |
+| pytorch3d | 0.7.8 |
+| NumPy | 1.23.5 |
+| moderngl-window | 2.4.6 (使用 pyglet 后端) |
+
+<details>
+  <summary>Windows 安装步骤（点击展开）</summary>
+
+#### 步骤 1：创建 conda 环境
+
+```powershell
+# 创建并激活新环境（推荐 Python 3.10）
+conda create -n hood python=3.10 -y
+conda activate hood
+```
+
+#### 步骤 2：安装 PyTorch 2.4.0 + CUDA 11.8（已验证版本）
+
+```powershell
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu118
+```
+
+#### 步骤 3：安装 PyTorch Geometric 2.3.0 和扩展包
+
+```powershell
+# 安装 PyG 2.3.0（必须是此版本，新版本有 API 不兼容问题）
+pip install torch_geometric==2.3.0
+
+# 安装扩展包（版本需匹配 PyTorch 2.4.0 + CUDA 11.8）
+pip install torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.4.0+cu118.html
+```
+
+#### 步骤 4：安装 PyTorch3D
+
+PyTorch3D 在 Windows 上没有官方预编译包，推荐使用第三方预编译的 wheel 文件安装。
+
+**下载预编译 wheel 文件**：
+- 访问: https://github.com/facebookresearch/pytorch3d/releases 或搜索 "pytorch3d windows wheel"
+- 下载与你的 PyTorch/CUDA/Python 版本匹配的 wheel 文件
+- 对于 **PyTorch 2.4.0 + CUDA 11.8 + Python 3.10**，下载文件名类似：
+  `pytorch3d-0.7.8+5043d15pt2.4.0cu118-cp310-cp310-win_amd64.whl`
+
+```powershell
+# 安装依赖
+pip install fvcore iopath
+
+# 安装下载的 wheel 文件（将路径替换为你的实际下载路径）
+pip install pytorch3d-0.7.8+5043d15pt2.4.0cu118-cp310-cp310-win_amd64.whl
+```
+
+> **备选方案**：如果找不到预编译 wheel，可以从源码编译（需要 Visual Studio Build Tools）：
+> ```powershell
+> pip install "git+https://github.com/facebookresearch/pytorch3d.git"
+> ```
+
+#### 步骤 5：安装 NumPy 1.23.5（重要！）
+
+```powershell
+# 必须使用此版本，新版本与 chumpy 不兼容
+pip install numpy==1.23.5
+```
+
+#### 步骤 6：安装基础 conda 包
+
+```powershell
+conda install -c conda-forge munch pandas tqdm omegaconf matplotlib einops ffmpeg pyyaml -y
+```
+
+#### 步骤 7：安装 pip 依赖
+
+```powershell
+pip install -r requirements.txt
+```
+
+#### 步骤 8：安装 chumpy（特殊处理）
+
+```powershell
+# 使用 --no-build-isolation 避免构建问题
+pip install chumpy --no-build-isolation
+```
+
+#### 步骤 9：安装 Jupyter（可选，用于运行 notebook）
+
+```powershell
+pip install notebook
+python -m ipykernel install --user --name hood --display-name "hood"
+```
+
+#### 步骤 10：设置环境变量
+
+在 Windows 中设置环境变量：
+
+**方法 A：临时设置（每次启动终端需要重新设置）**
+```powershell
+$env:HOOD_DATA = "E:\path\to\hood_data"
+$env:HOOD_PROJECT = "E:\path\to\HOOD"
+```
+
+**方法 B：永久设置**
+1. 按 `Win + R`，输入 `sysdm.cpl`，按回车
+2. 点击"高级"选项卡 -> "环境变量"
+3. 在"用户变量"中点击"新建"
+4. 添加 `HOOD_DATA` 和 `HOOD_PROJECT` 变量
+
+</details>
+
+<details>
+  <summary>Windows 一键安装脚本（复制到 PowerShell 执行）</summary>
+
+```powershell
+# 激活环境
+conda activate hood
+
+# 1. 安装 PyTorch 2.4.0 + CUDA 11.8
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu118
+
+# 2. 安装 PyG 2.3.0 和扩展包
+pip install torch_geometric==2.3.0
+pip install torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.4.0+cu118.html
+
+# 3. 安装 PyTorch3D（使用预编译 wheel 文件，需提前下载）
+pip install fvcore iopath
+# 将下面的文件名替换为你下载的 wheel 文件路径
+pip install pytorch3d-0.7.8+5043d15pt2.4.0cu118-cp310-cp310-win_amd64.whl
+
+# 4. 安装 NumPy 1.23.5
+pip install numpy==1.23.5
+
+# 5. 安装基础包
+conda install -c conda-forge munch pandas tqdm omegaconf matplotlib einops ffmpeg pyyaml -y
+
+# 6. 安装其他依赖
+pip install -r requirements.txt
+
+# 7. 安装 aitviewer 可视化依赖（使用 pyglet 后端）
+pip install moderngl-window==2.4.6 pyglet
+
+# 8. 安装 chumpy
+pip install chumpy --no-build-isolation
+
+# 9. 安装 Jupyter
+pip install notebook
+python -m ipykernel install --user --name hood --display-name "hood"
+```
+
+</details>
+
+<details>
+  <summary>Windows 常见问题</summary>
+
+#### Q1: `ImportError: cannot import name 'bool' from 'numpy'`
+这是 NumPy 版本过新导致的。解决方案：
+```powershell
+pip install numpy==1.23.5
+```
+
+#### Q2: `AttributeError: 'Inspector' object has no attribute 'inspect'`
+这是 PyG 版本过新导致的 API 不兼容。解决方案：
+```powershell
+pip install torch_geometric==2.3.0
+```
+
+#### Q3: `DLL load failed while importing _C`
+PyTorch3D 或 PyG 扩展包版本与 PyTorch 不匹配。确保使用正确的版本组合。
+
+#### Q4: PyTorch3D 安装失败
+- 推荐使用预编译 wheel 文件安装，下载地址：https://github.com/facebookresearch/pytorch3d/releases
+- 确保下载的 wheel 文件与你的 PyTorch/CUDA/Python 版本匹配
+- 如果从源码编译，需要先安装 Visual Studio Build Tools 和 C++ 编译器
+- 源码安装命令: `pip install "git+https://github.com/facebookresearch/pytorch3d.git"`
+
+#### Q5: chumpy 安装失败
+```powershell
+pip install chumpy --no-build-isolation
+# 或从 GitHub 安装
+pip install git+https://github.com/mattloper/chumpy.git
+```
+
+#### Q6: scikit-image 依赖冲突
+```powershell
+pip install scikit-image==0.21.0
+```
+
+#### Q7: aitviewer 显示问题 / `'PyQt5Window' object has no attribute '_ctx'`
+Windows 上 aitviewer 需要使用 pyglet 后端而不是 PyQt5 后端。解决方案：
+```powershell
+pip install moderngl-window==2.4.6 pyglet
+```
+
+如果仍有 OpenGL 相关问题：
+```powershell
+pip install PyOpenGL PyOpenGL_accelerate
+```
+
 </details>
 
 ### Download data

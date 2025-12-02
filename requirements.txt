@@ -1,0 +1,52 @@
+# HOOD: Windows 系统依赖安装指南
+# ================================
+# 基于成功验证的版本配置
+# 
+# 安装顺序：
+# 1. 先按照 README.md 安装 PyTorch 2.4.0 + CUDA 11.8
+# 2. 安装 PyG 2.3.0 和扩展包
+# 3. 安装 PyTorch3D
+# 4. 最后运行: pip install -r requirements.txt
+
+# ============ 核心依赖（指定版本以确保兼容性）============
+numpy==1.23.5
+scipy>=1.7.3,<1.16.0
+pandas>=1.5.0
+
+# ============ 深度学习工具 ============
+einops>=0.6.0
+
+# ============ 配置管理 ============
+omegaconf>=2.3.0
+munch>=3.0.0
+pyyaml>=6.0
+
+# ============ SMPL人体模型 ============
+smplx>=0.1.28
+chumpy>=0.70
+
+# ============ 可视化相关 ============
+matplotlib>=3.7.0
+huepy>=1.2.1
+
+# aitviewer 及其依赖（Windows 需要使用 pyglet 后端）
+aitviewer>=1.13.0
+moderngl-window==2.4.6
+pyglet
+
+# ============ 图像和视频处理 ============
+imageio>=2.31.0
+opencv-contrib-python-headless>=4.7.0
+scikit-image>=0.19.3,<0.22.0
+scikit-video>=1.1.11
+Pillow>=9.4.0
+
+# ============ 3D处理 ============
+trimesh>=3.21.0
+
+# ============ 其他工具 ============
+roma>=1.3.2
+tqdm>=4.65.0
+
+# ============ 机器学习 ============
+scikit-learn>=1.2.0
