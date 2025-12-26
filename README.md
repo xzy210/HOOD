@@ -158,8 +158,8 @@ python -m ipykernel install --user --name hood --display-name "hood"
 
 **方法 A：临时设置（每次启动终端需要重新设置）**
 ```powershell
-$env:HOOD_DATA = "E:\path\to\hood_data"
-$env:HOOD_PROJECT = "E:\path\to\HOOD"
+$env:HOOD_DATA = "E:\Projects4\HOOD\\hood_data"
+$env:HOOD_PROJECT = "E:\Projects4\HOOD\"
 ```
 
 **方法 B：永久设置**

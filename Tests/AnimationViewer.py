@@ -82,7 +82,7 @@ class ViewerConfig:
     obstacle_color: Tuple[float, ...] = (0.4, 0.4, 0.4, 1.0)
     camera_distance: float = 3.0
     backface_culling: bool = False
-    place_on_floor: bool = True
+    place_on_floor: bool = False
 
 
 @dataclass
