@@ -6,21 +6,36 @@ without modifying core library files.
 This module provides:
 1. MeshDatasetWrapper: Wraps the dataset to properly format mesh sequence data
 2. MeshRunner: Custom runner that handles mesh data format in collect_sample
+3. mesh_run_epoch: Custom training loop with loss logging and TensorBoard support
 """
 
+import os
 import torch
 import numpy as np
+from datetime import datetime
 from torch import nn
+from torch.utils.data import DataLoader
 from torch_geometric.data import HeteroData, Batch
 from typing import Dict, Optional
 from omegaconf.dictconfig import DictConfig
+from tqdm import tqdm
+from huepy import yellow
+
+# Optional TensorBoard support
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    SummaryWriter = None
+    TENSORBOARD_AVAILABLE = False
 
 from runners.from_any_pose import Runner as BaseRunner
 from runners.utils.collector import SampleCollector
 from runners.utils.collision import CollisionPreprocessor
 from runners.utils.material import RandomMaterial
 from utils.cloth_and_material import FaceNormals, ClothMatAug
-from utils.common import move2device, add_field_to_pyg_batch
+from utils.common import move2device, add_field_to_pyg_batch, save_checkpoint
+from utils.defaults import DEFAULTS
 
 
 class MeshDatasetWrapper:
@@ -43,7 +58,20 @@ class MeshDatasetWrapper:
             base_dataset: The original dataset from from_any_pose.py
         """
         self.base_dataset = base_dataset
-        self._len = len(base_dataset)
+        
+        # Load a sample to determine sequence length
+        # The obstacle.pos is [V, N, 3] where N is number of frames
+        sample = base_dataset[0]
+        if hasattr(sample['obstacle'], 'pos') and sample['obstacle'].pos.dim() == 3:
+            n_frames = sample['obstacle'].pos.shape[1]
+            # We need at least 3 frames for temporal offset (prev, current, target)
+            # After offset: prev_pos uses frames [0, N-3], pos uses [1, N-2], target_pos uses [2, N-1]
+            # So the valid sequence length is N - 2
+            self._len = max(1, n_frames - 2)
+        else:
+            self._len = 1
+        
+        print(f"[MeshDatasetWrapper] Sequence has {n_frames} frames, {self._len} valid training frames per epoch")
     
     def __len__(self):
         return self._len
@@ -178,3 +206,139 @@ def create_mesh_runner(model, criterion_dict, mcfg):
         MeshRunner instance
     """
     return MeshRunner(model, criterion_dict, mcfg)
+
+
+def mesh_run_epoch(training_module: MeshRunner, aux_modules: dict, dataloader: DataLoader,
+                   n_epoch: int, cfg: DictConfig, global_step=None, writer=None,
+                   log_every: int = 100):
+    """
+    Custom run_epoch function with loss logging and TensorBoard support.
+    
+    Args:
+        training_module: The MeshRunner training module
+        aux_modules: Dictionary containing optimizer and scheduler
+        dataloader: Training data loader
+        n_epoch: Current epoch number
+        cfg: Configuration object
+        global_step: Current global step (optional)
+        writer: TensorBoard SummaryWriter (optional)
+        log_every: Print loss log every N steps (default: 100)
+    
+    Returns:
+        global_step: Updated global step after this epoch
+    """
+    global_step = global_step or len(dataloader) * n_epoch
+    
+    optimizer = aux_modules['optimizer']
+    scheduler = aux_modules['scheduler']
+    
+    # Setup checkpoints directory
+    if hasattr(cfg, 'run_dir'):
+        checkpoints_dir = os.path.join(cfg.run_dir, 'checkpoints')
+    else:
+        now = datetime.now()
+        dt_string = now.strftime("%Y%m%d_%H%M%S")
+        cfg.run_dir = os.path.join(DEFAULTS.experiment_root, dt_string)
+        checkpoints_dir = os.path.join(cfg.run_dir, 'checkpoints')
+    
+    print(yellow(f'run_epoch started, checkpoints will be saved in {checkpoints_dir}'))
+    
+    # Progress bar with loss display
+    prbar = tqdm(dataloader, desc=f"Epoch {n_epoch + 1}")
+    
+    # Accumulate losses for logging
+    loss_accumulator = {}
+    loss_count = 0
+    
+    for sample in prbar:
+        global_step += 1
+        if cfg.experiment.max_iter is not None and global_step > cfg.experiment.max_iter:
+            break
+        
+        sample = move2device(sample, cfg.device)
+        
+        # Add `iter` field to the sample
+        B = sample.num_graphs
+        sample = add_field_to_pyg_batch(sample, 'iter', [global_step] * B, 'cloth', reference_key=None)
+        
+        # Number of autoregressive steps
+        roll_steps = 1 + (global_step // training_module.mcfg.increase_roll_every)
+        roll_steps = min(roll_steps, training_module.mcfg.roll_max)
+        
+        # Forward pass and optimization
+        optimizer_to_pass = optimizer if global_step >= training_module.mcfg.warmup_steps else None
+        scheduler_to_pass = scheduler if global_step >= training_module.mcfg.warmup_steps else None
+        ld_to_write = training_module(sample, roll_steps=roll_steps, optimizer=optimizer_to_pass,
+                                      scheduler=scheduler_to_pass)
+        
+        # Accumulate losses
+        for key, value in ld_to_write.items():
+            if key not in loss_accumulator:
+                loss_accumulator[key] = 0.0
+            loss_accumulator[key] += value
+        loss_count += 1
+        
+        # Update progress bar with current loss
+        if 'total' in ld_to_write:
+            prbar.set_postfix({'loss': f"{ld_to_write['total']:.6f}", 'step': global_step})
+        
+        # Log to TensorBoard and console every log_every steps
+        if global_step % log_every == 0:
+            # Calculate average losses
+            avg_losses = {k: v / loss_count for k, v in loss_accumulator.items()}
+            
+            # Print to console
+            loss_str = " | ".join([f"{k}: {v:.6f}" for k, v in avg_losses.items()])
+            print(f"\n[Step {global_step}] {loss_str}")
+            
+            # Write to TensorBoard
+            if writer is not None:
+                for key, value in avg_losses.items():
+                    writer.add_scalar(f'loss/{key}', value, global_step)
+                
+                # Also log learning rate
+                if scheduler is not None:
+                    current_lr = optimizer.param_groups[0]['lr']
+                    writer.add_scalar('train/learning_rate', current_lr, global_step)
+            
+            # Reset accumulator
+            loss_accumulator = {}
+            loss_count = 0
+        
+        # Save checkpoint
+        if global_step % cfg.experiment.save_checkpoint_every == 0:
+            os.makedirs(checkpoints_dir, exist_ok=True)
+            checkpoint_path = os.path.join(checkpoints_dir, f"step_{global_step:010d}.pth")
+            save_checkpoint(training_module, aux_modules, cfg, checkpoint_path)
+            print(f"\n[Step {global_step}] Checkpoint saved: {checkpoint_path}")
+    
+    return global_step
+
+
+def create_tensorboard_writer(log_dir: str, experiment_name: str = None):
+    """
+    Create a TensorBoard SummaryWriter.
+    
+    Args:
+        log_dir: Base directory for logs
+        experiment_name: Optional experiment name (uses timestamp if not provided)
+    
+    Returns:
+        SummaryWriter instance, or None if TensorBoard is not available
+    """
+    if not TENSORBOARD_AVAILABLE:
+        print("[TensorBoard] WARNING: tensorboard is not installed. Install with 'pip install tensorboard'")
+        print("[TensorBoard] Training will continue without TensorBoard logging.")
+        return None
+    
+    if experiment_name is None:
+        experiment_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    tensorboard_dir = os.path.join(log_dir, 'tensorboard', experiment_name)
+    os.makedirs(tensorboard_dir, exist_ok=True)
+    
+    writer = SummaryWriter(log_dir=tensorboard_dir)
+    print(f"[TensorBoard] Logs will be saved to: {tensorboard_dir}")
+    print(f"[TensorBoard] Run 'tensorboard --logdir={os.path.dirname(tensorboard_dir)}' to visualize")
+    
+    return writer

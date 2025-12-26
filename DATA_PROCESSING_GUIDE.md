@@ -336,6 +336,92 @@ split_path: 'datasplits/train.csv'
 └── 通过多个 epoch 遍历所有序列的所有帧
 ```
 
+### 训练帧选择机制
+
+**train.py 会随机选择中间帧开始训练，而不是从第一帧开始。**
+
+#### 帧选择流程
+
+```mermaid
+flowchart TD
+    A[数据集初始化] --> B[计算每个序列可用帧数<br>_lens = N - 7]
+    B --> C[展平所有帧为全局索引池<br>all_lens]
+    C --> D[DataLoader 随机采样全局索引]
+    D --> E[_find_idx 映射到<br>序列名 + 帧索引 idx]
+    E --> F[load_sample 加载<br>idx 到 idx+lookup_steps 帧]
+```
+
+#### 关键代码
+
+**`Dataset.__getitem__`** (datasets/postcvpr.py):
+
+```python
+def __getitem__(self, item: int) -> HeteroData:
+    if self.wholeseq:
+        # 验证模式：加载整个序列
+        fname = self.datasplit.id[item]
+        idx = 0
+    else:
+        # 训练模式：通过全局索引找到具体的 序列 + 帧位置
+        fname, idx, garment_name = self._find_idx(item)
+    
+    sample = self.loader.load_sample(fname, idx, garment_name, betas_id=betas_id)
+```
+
+#### 具体过程
+
+1. 假设序列有 100 帧，`lookup_steps=5`，则 `_lens = 100 - 7 = 93`（可用起始帧：0~92）
+2. DataLoader 随机打乱索引池
+3. 每个训练样本从 **随机帧位置 `idx`** 开始，加载 `idx` 到 `idx + lookup_steps + 2` 帧
+
+### 衣服初始化机制
+
+**动画帧的衣服是基于当前帧的 SMPL 姿态参数，通过 LBS（线性混合蒙皮）将静态模板衣服变形到该姿态，而不是从静态 T-pose 开始。**
+
+#### 初始化流程
+
+```mermaid
+flowchart LR
+    A[静态模板衣服<br>rest_pos] --> B[LBS 蒙皮]
+    B --> C[当前帧姿态的衣服<br>posed_garment]
+    
+    subgraph LBS["LBS 蒙皮过程"]
+        D[形状混合<br>shapedirs × betas]
+        E[姿态混合<br>posedirs × pose]
+        F[关节蒙皮变换<br>lbs_weights × joints]
+    end
+```
+
+#### 关键代码
+
+**`GarmentBuilder.make_cloth_verts`** (datasets/postcvpr.py):
+
+```python
+def make_cloth_verts(self, body_pose, global_orient, transl, betas, garment_name):
+    # 使用 GarmentSMPL 模型，基于当前帧的 SMPL 参数生成衣服顶点
+    garment_smpl_model = self.garment_smpl_model_dict[garment_name]
+    full_pose = torch.cat([global_orient, body_pose], dim=1)
+    
+    with torch.no_grad():
+        # 通过 LBS 将静态衣服变形到当前姿态
+        vertices = garment_smpl_model.make_vertices(betas=betas, full_pose=full_pose, transl=transl)
+```
+
+#### 训练时的帧处理
+
+| rollout step | `prev_pos` | `pos` | `target_pos` | 说明 |
+|--------------|------------|-------|--------------|------|
+| `idx=0` (第一帧) | `pos` (50%概率) | LBS(frame_idx) | LBS(frame_idx) | 初始帧，target=pos（静止） |
+| `idx=1` (第二帧) | `pos` | `pos` | lookup[0] | 速度=0 |
+| `idx≥2` | 上一帧的 `pos` | 上一帧的 `pred_pos` | lookup[idx-1] | 正常自回归 |
+
+#### 设计优势
+
+| 设计 | 优势 |
+|------|------|
+| 随机起始帧 | 增加训练多样性，模型能学习从任意姿态开始仿真 |
+| LBS 初始化 | 衣服初始位置已经贴合人体，减少仿真初期的不稳定性 |
+
 ---
 
 ## 7. 完整数据加载流程

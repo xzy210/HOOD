@@ -20,7 +20,7 @@ from omegaconf import OmegaConf
 from utils.arguments import create_modules, load_module
 
 # Import custom mesh training utilities
-from Tests.mesh_training_utils import MeshDatasetWrapper, MeshRunner
+from Tests.mesh_training_utils import MeshDatasetWrapper, MeshRunner, mesh_run_epoch, create_tensorboard_writer
 
 
 def setup_paths(config, mesh_sequence=None, garment=None):
@@ -88,6 +88,17 @@ def main():
         type=str,
         default=None,
         help='Path to garment template file (.pkl or .obj, overrides config)'
+    )
+    parser.add_argument(
+        '--log_every',
+        type=int,
+        default=100,
+        help='Print loss log every N steps (default: 100)'
+    )
+    parser.add_argument(
+        '--no_tensorboard',
+        action='store_true',
+        help='Disable TensorBoard logging'
     )
     args = parser.parse_args()
     
@@ -261,6 +272,11 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output directory: {output_dir}")
     
+    # Create TensorBoard writer
+    writer = None
+    if not args.no_tensorboard:
+        writer = create_tensorboard_writer(output_dir, config.experiment.name)
+    
     # Training loop
     global_step = config.step_start
     
@@ -269,25 +285,34 @@ def main():
     
     print("\n" + "=" * 60)
     print("Starting Training")
+    print(f"Log every: {args.log_every} steps")
+    print(f"TensorBoard: {'Enabled' if writer else 'Disabled'}")
     print("=" * 60)
     
-    for i in range(config.experiment.n_epochs):
-        print(f"\nEpoch {i + 1}/{config.experiment.n_epochs}")
-        print("-" * 60)
-        
-        dataloader = dataloader_m.create_dataloader()
-        global_step = runner.run_epoch(
-            training_module, aux_modules, dataloader, i, config,
-            global_step=global_step
-        )
-        
-        if config.experiment.max_iter is not None and global_step > config.experiment.max_iter:
-            break
+    try:
+        for i in range(config.experiment.n_epochs):
+            print(f"\nEpoch {i + 1}/{config.experiment.n_epochs}")
+            print("-" * 60)
+            
+            dataloader = dataloader_m.create_dataloader()
+            global_step = mesh_run_epoch(
+                training_module, aux_modules, dataloader, i, config,
+                global_step=global_step, writer=writer, log_every=args.log_every
+            )
+            
+            if config.experiment.max_iter is not None and global_step > config.experiment.max_iter:
+                break
+    finally:
+        # Close TensorBoard writer
+        if writer is not None:
+            writer.close()
     
     print("\n" + "=" * 60)
     print("Training completed!")
     print(f"Final global step: {global_step}")
     print(f"Checkpoints saved in: {output_dir}")
+    if not args.no_tensorboard:
+        print(f"TensorBoard logs in: {os.path.join(output_dir, 'tensorboard')}")
     print("=" * 60)
 
 

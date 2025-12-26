@@ -3,8 +3,8 @@
 experiment:
   name: mesh_training
   output_dir: 'Tests/checkpoints'              # Output directory in Tests folder
-  save_checkpoint_every: 2000
-  n_epochs: 20000
+  save_checkpoint_every: 1000
+  n_epochs: 10000
   checkpoint_path: null                        # Set path to resume from checkpoint
 
 runner:
@@ -33,11 +33,11 @@ dataloader:
       
       # Path to your mesh sequence .pkl file (relative to project root or absolute)
       # Format: {'verts': [N, V, 3], 'faces': [F, 3]}
-      pose_sequence_path: 'Tests/mesh_sequence.pkl'
+      pose_sequence_path: 'Tests/data/sphere_sequence.pkl'
       
       # Path to garment template .pkl file (relative to project root or absolute)
       # Note: Also supports .obj format - the system will auto-detect and convert
-      garment_template_path: 'Tests/garment_template.pkl'
+      garment_template_path: 'Tests/data/square_cloth.obj'
       
       # Optional: path to obstacle auxiliary data file
       # obstacle_dict_file: 'Tests/obstacle_aux.pkl'

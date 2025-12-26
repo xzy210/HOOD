@@ -166,3 +166,7 @@ cython_debug/
 #
 Debug.ipynb
 *_local*
+
+
+Tests/checkpoints/
+Tests/data/
