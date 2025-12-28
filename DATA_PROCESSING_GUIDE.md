@@ -834,12 +834,390 @@ else:
 
 ## 数据增强策略
 
-主要增强方式：
+train.py 使用 `postcvpr` 数据集模块，通过配置文件 `configs/postcvpr.yaml` 启用多种数据增强策略。
 
-1. **位置噪声**：noise_scale=3e-3 的高斯噪声
-2. **随机体型**：random_betas 选项
-3. **静息姿态缩放**：restpos_scale_min/max 参数
-4. **随机粗糙边中心**：每次从图的多个中心点中随机选择
+### 配置参数
+
+```yaml
+# postcvpr.yaml 中的数据增强配置
+dataset:
+  postcvpr:
+    random_betas: True      # 启用随机体型
+    betas_scale: 3.         # 体型参数缩放范围 [-3, 3]
+    noise_scale: 3e-3       # 位置噪声标准差（默认值）
+    n_coarse_levels: 3      # 粗糙边层级数
+```
+
+### 增强方式详解
+
+#### 1. 位置噪声 (Position Noise)
+
+**实现位置**：`datasets/postcvpr.py` - `NoiseMaker.add_noise()` 方法
+
+**原理**：对服装顶点的 `pos` 和 `prev_pos` 添加高斯噪声，增强模型对位置扰动的鲁棒性。
+
+```python
+# NoiseMaker.add_noise() 核心逻辑
+def add_noise(self, sample: HeteroData) -> HeteroData:
+    if self.mcfg.noise_scale == 0:
+        return sample
+
+    world_pos = sample['cloth'].pos
+    vertex_type = sample['cloth'].vertex_type
+
+    # 生成高斯噪声
+    noise = np.random.normal(scale=self.mcfg.noise_scale, size=world_pos.shape)
+    noise_prev = np.random.normal(scale=self.mcfg.noise_scale, size=world_pos.shape)
+
+    # 只对普通顶点添加噪声（不对固定顶点添加）
+    mask = vertex_type == NodeType.NORMAL
+    noise = noise * mask
+
+    sample['cloth'].pos = sample['cloth'].pos + noise
+    sample['cloth'].prev_pos = sample['cloth'].prev_pos + noise_prev
+    return sample
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `noise_scale` | 3e-3 | 高斯噪声标准差（单位：米） |
+
+**注意**：固定顶点（`vertex_type == NodeType.HANDLE`）不会被添加噪声。
+
+#### 2. 随机体型 (Random Betas)
+
+**实现位置**：`datasets/postcvpr.py` - `SequenceLoader.process_sequence()` 方法
+
+**原理**：随机采样 SMPL 体型参数（betas），使模型能泛化到不同体型的人体。
+
+```python
+# process_sequence() 中的 random_betas 逻辑
+if self.mcfg.random_betas:
+    betas = sequence['betas']
+    random_betas = np.random.rand(*betas.shape)      # 生成 [0, 1] 均匀分布
+    random_betas = random_betas * self.mcfg.betas_scale * 2  # 缩放到 [0, 2*scale]
+    random_betas -= self.mcfg.betas_scale            # 偏移到 [-scale, scale]
+    sequence['betas'] = random_betas
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `random_betas` | False | 是否启用随机体型 |
+| `betas_scale` | 3.0 | 体型参数范围 `[-betas_scale, betas_scale]` |
+
+**效果**：当 `betas_scale=3` 时，生成的体型参数在 `[-3, 3]` 范围内均匀分布，覆盖从瘦到胖、从矮到高的各种体型。
+
+#### 3. 静息姿态缩放 (Rest Position Scale)
+
+**配置参数**：
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `restpos_scale_min` | 1.0 | 最小缩放比例 |
+| `restpos_scale_max` | 1.0 | 最大缩放比例 |
+
+**原理**：对服装的静息姿态位置进行随机缩放，模拟不同尺码的服装。当 `min=max=1.0` 时不进行缩放。
+
+#### 4. 随机粗糙边中心 (Random Coarse Edge Center)
+
+**实现位置**：`datasets/postcvpr.py` - `GarmentBuilder.add_coarse()` 方法
+
+**原理**：图的中心点（center）是指到最远节点距离最小的节点。服装网格可能有多个中心点，每次随机选择一个来构建粗糙边层级。
+
+```python
+# add_coarse() 核心逻辑
+def add_coarse(self, sample: HeteroData, garment_name: str) -> HeteroData:
+    garment_dict = self.garments_dict[garment_name]
+    faces = garment_dict['faces']
+
+    # 随机选择图的中心点
+    center_nodes = garment_dict['center']  # 预计算的所有中心点列表
+    center = np.random.choice(center_nodes)  # 随机选择一个
+
+    # 基于选定中心点计算粗糙边（带缓存）
+    if center in garment_dict['coarse_edges']:
+        coarse_edges_dict = garment_dict['coarse_edges'][center]
+    else:
+        coarse_edges_dict = make_coarse_edges(faces, center, n_levels=self.mcfg.n_coarse_levels)
+        garment_dict['coarse_edges'][center] = coarse_edges_dict
+
+    # 添加多层级粗糙边
+    for i in range(self.mcfg.n_coarse_levels):
+        key = f'coarse_edge{i}'
+        edges_coarse = coarse_edges_dict[i]
+        # 添加双向边
+        edges_coarse = np.concatenate([edges_coarse, edges_coarse[:, [1, 0]]], axis=0)
+        sample['cloth', key, 'cloth'].edge_index = torch.tensor(edges_coarse.T)
+    
+    return sample
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `n_coarse_levels` | 1 | 粗糙边层级数（train.py 使用 3） |
+
+**效果**：不同中心点生成不同的粗糙边拓扑，增加训练数据的多样性。
+
+#### 5. 手臂分离 (Separate Arms)
+
+**配置参数**：`separate_arms: bool = False`
+
+**原理**：调整手臂姿态，避免手臂与身体躯干的自穿透问题。
+
+```python
+# process_sequence() 中的 separate_arms 逻辑
+if self.mcfg.separate_arms:
+    body_pose = sequence['body_pose']
+    global_orient = sequence['global_orient']
+    full_pos = np.concatenate([global_orient, body_pose], axis=1)
+    full_pos = separate_arms(full_pos)  # 调整手臂角度
+    sequence['global_orient'] = full_pos[:, :3]
+    sequence['body_pose'] = full_pos[:, 3:]
+```
+
+#### 6. 手部姿态归零 (Zero Hand Pose)
+
+**实现位置**：`SequenceLoader.process_sequence()` 方法
+
+**原理**：将 SMPL 的手部姿态参数（body_pose 的最后 6 维）设为零，消除不真实的手部姿态。
+
+```python
+# 始终执行，不可配置
+sequence['body_pose'][:, -6:] *= 0
+```
+
+### 数据增强调用流程
+
+```mermaid
+graph TD
+    A[Dataset.__getitem__] --> B[Loader.load_sample]
+    B --> C[SequenceLoader.load_sequence]
+    C --> D[process_sequence]
+    D --> D1[separate_arms 手臂分离]
+    D --> D2[random_betas 随机体型]
+    D --> D3[手部姿态归零]
+    D --> D4[zero_betas 体型归零]
+    B --> E[GarmentBuilder.build]
+    E --> E1[NoiseMaker.add_noise 位置噪声]
+    E --> E2[add_coarse 随机粗糙边中心]
+```
+
+### train.py vs train_mesh.py 对比
+
+| 数据增强 | train.py (postcvpr) | train_mesh.py (from_any_pose) |
+|----------|---------------------|-------------------------------|
+| 位置噪声 | ✅ `noise_scale=3e-3` | ❌ 未配置 |
+| 随机体型 | ✅ `random_betas=True, betas_scale=3` | ❌ 不适用（mesh格式无SMPL参数）|
+| 随机粗糙边中心 | ✅ 内置 | ✅ 内置 |
+| 手臂分离 | ⚪ 可选（默认关闭） | ❌ 不适用 |
+| 手部姿态归零 | ✅ 始终启用 | ❌ 不适用 |
+| 随机材质 | ✅ 支持 | ✅ 支持 |
+
+---
+
+## 随机材质机制 (Random Material)
+
+训练过程中会随机采样布料的物理材质参数，使模型能够学习不同材质布料的物理行为，实现条件生成。
+
+### 核心类：RandomMaterial
+
+**实现位置**：`utils/cloth_and_material.py` - `RandomMaterial` 类
+
+```python
+class RandomMaterial:
+    """随机材质采样器，用于训练时动态调整布料物理参数"""
+    
+    def __init__(self, mcfg):
+        self.density_min = mcfg.density_min        # 密度最小值
+        self.density_max = mcfg.density_max        # 密度最大值
+        self.lame_mu_min = mcfg.lame_mu_min        # 拉梅第一参数最小值
+        self.lame_mu_max = mcfg.lame_mu_max        # 拉梅第一参数最大值
+        self.lame_lambda_min = mcfg.lame_lambda_min  # 拉梅第二参数最小值
+        self.lame_lambda_max = mcfg.lame_lambda_max  # 拉梅第二参数最大值
+        self.bending_coeff_min = mcfg.bending_coeff_min  # 弯曲系数最小值
+        self.bending_coeff_max = mcfg.bending_coeff_max  # 弯曲系数最大值
+    
+    def sample(self):
+        """随机采样一组材质参数"""
+        density = random_uniform(self.density_min, self.density_max)
+        lame_mu = random_log(self.lame_mu_min, self.lame_mu_max)      # 对数采样
+        lame_lambda = random_uniform(self.lame_lambda_min, self.lame_lambda_max)
+        bending_coeff = random_log(self.bending_coeff_min, self.bending_coeff_max)  # 对数采样
+        return density, lame_mu, lame_lambda, bending_coeff
+```
+
+### 材质参数说明
+
+| 参数 | 物理含义 | 采样方式 | 默认范围 |
+|------|----------|----------|----------|
+| `density` | 布料密度 (kg/m²) | 线性均匀采样 | 0.0434 ~ 0.7 |
+| `lame_mu` | 拉梅第一参数（剪切模量） | 对数均匀采样 | 15909 ~ 63636 |
+| `lame_lambda` | 拉梅第二参数 | 线性均匀采样 | 3535.41 ~ 93333.74 |
+| `bending_coeff` | 弯曲系数 | 对数均匀采样 | 6.37e-08 ~ 0.00131 |
+
+**采样方式说明**：
+- **线性均匀采样**：`random_uniform(min, max)` - 在 [min, max] 范围内均匀分布
+- **对数均匀采样**：`random_log(min, max)` - 在 log 空间均匀分布，适用于跨越多个数量级的参数
+
+### 配置方法
+
+在配置文件（如 `train_mesh_config.yaml`）的 `runner` 部分设置材质参数范围：
+
+```yaml
+runner:
+  from_any_pose:
+    material:
+      density_min: 0.0434
+      density_max: 0.7
+      lame_mu_min: 15909
+      lame_mu_max: 63636
+      lame_lambda_min: 3535.41
+      lame_lambda_max: 93333.74
+      bending_coeff_min: 6.37e-08
+      bending_coeff_max: 0.00131
+```
+
+### 调用流程
+
+随机材质在每个训练 batch 的 `forward` 方法中被调用：
+
+```mermaid
+sequenceDiagram
+    participant Runner as BaseRunner/MeshRunner
+    participant RM as RandomMaterial
+    participant Cloth as Cloth Object
+    participant Loss as Loss Calculation
+
+    Runner->>Runner: forward(sample, roll_steps)
+    Runner->>Runner: add_cloth_obj(sample)
+    Runner->>Runner: set_random_material(sample)
+    Runner->>RM: sample()
+    RM-->>Runner: (density, lame_mu, lame_lambda, bending_coeff)
+    Runner->>Cloth: set_batch(sample, material_params)
+    Note over Cloth: 基于 rest_pos 计算：<br/>Dm_inv, f_area, v_mass
+    Cloth-->>Runner: cloth object with material
+    Runner->>Loss: criterion_pass(sample)
+    Note over Loss: 使用材质参数计算：<br/>拉伸能量、弯曲能量
+```
+
+### 关键代码实现
+
+**set_random_material 方法** (`runners/postcvpr.py`):
+
+```python
+def set_random_material(self, sample):
+    """为当前 batch 设置随机材质参数"""
+    density, lame_mu, lame_lambda, bending_coeff = self.random_material.sample()
+    
+    sample['cloth'].density = density
+    sample['cloth'].lame_mu = lame_mu
+    sample['cloth'].lame_lambda = lame_lambda
+    sample['cloth'].bending_coeff = bending_coeff
+    
+    return sample
+```
+
+**Cloth.set_batch 方法** (`utils/cloth_and_material.py`):
+
+```python
+def set_batch(self, example, material_params):
+    """设置当前 batch 的布料数据，基于 rest_pos 计算物理参数"""
+    v = example['cloth'].rest_pos  # 使用静态 rest_pos 作为计算基准
+    
+    # 计算变形梯度逆矩阵（用于拉伸能量）
+    self.Dm_inv = compute_Dm_inv(v, self.f)
+    
+    # 计算面片面积
+    self.f_area = compute_face_area(v, self.f)
+    
+    # 计算顶点质量（基于密度和面积）
+    self.v_mass = compute_vertex_mass(self.f_area, density)
+```
+
+### 材质参数的使用
+
+#### 1. 拉伸能量计算
+
+材质参数 `lame_mu` 和 `lame_lambda` 用于计算拉伸能量 loss：
+
+```python
+def stretching_energy(pred_pos, Dm_inv, f_area, lame_mu, lame_lambda):
+    # 计算变形梯度 F
+    F = deformation_gradient(pred_triangles, Dm_inv)
+    
+    # 计算 Green 应变张量
+    G = green_strain_tensor(F)
+    
+    # 计算应变能量密度（St. Venant-Kirchhoff 模型）
+    energy_density = lame_mu * trace(G @ G) + 0.5 * lame_lambda * trace(G)**2
+    
+    # 总能量 = 面积 × 厚度 × 能量密度
+    energy = f_area * thickness * energy_density
+    return energy.sum()
+```
+
+#### 2. 弯曲能量计算
+
+材质参数 `bending_coeff` 用于计算弯曲能量 loss：
+
+```python
+def bending_energy(pred_pos, edges, bending_coeff):
+    # 计算二面角变化
+    dihedral_angle = compute_dihedral_angle(pred_pos, edges)
+    rest_angle = compute_dihedral_angle(rest_pos, edges)
+    
+    # 弯曲能量 = 弯曲系数 × (角度变化)²
+    energy = bending_coeff * (dihedral_angle - rest_angle)**2
+    return energy.sum()
+```
+
+#### 3. 惯性项计算
+
+材质参数 `density` 用于计算顶点质量，进而影响惯性项：
+
+```python
+def inertia_term(pred_pos, pos, prev_pos, v_mass, dt):
+    # 加速度
+    acceleration = (pred_pos - 2 * pos + prev_pos) / dt**2
+    
+    # 惯性力 = 质量 × 加速度
+    inertia = v_mass * acceleration
+    return inertia
+```
+
+### 模型输入：归一化材质参数
+
+随机材质参数不仅用于 loss 计算，还会被归一化后作为模型的条件输入：
+
+```python
+def normalize_material(density, lame_mu, lame_lambda, bending_coeff, mcfg):
+    """将材质参数归一化到 [0, 1] 范围"""
+    density_norm = (density - mcfg.density_min) / (mcfg.density_max - mcfg.density_min)
+    lame_mu_norm = (log(lame_mu) - log(mcfg.lame_mu_min)) / (log(mcfg.lame_mu_max) - log(mcfg.lame_mu_min))
+    # ... 其他参数类似
+    return torch.tensor([density_norm, lame_mu_norm, lame_lambda_norm, bending_coeff_norm])
+```
+
+这些归一化参数作为额外特征输入到图神经网络，使模型能够根据材质参数生成对应的物理行为。
+
+### 设计优势
+
+| 设计 | 优势 |
+|------|------|
+| 随机材质采样 | 增强模型对不同材质布料的泛化能力 |
+| 条件生成 | 推理时可指定材质参数，控制布料行为 |
+| 对数采样 | 适应跨越多个数量级的物理参数 |
+| 基于 rest_pos 计算 | 物理参数（Dm_inv, f_area）保持稳定，符合真实物理 |
+
+### train.py 与 train_mesh.py 的随机材质对比
+
+| 特性 | train.py | train_mesh.py |
+|------|----------|---------------|
+| 随机材质支持 | ✅ 支持 | ✅ 支持 |
+| 实现方式 | BaseRunner.set_random_material | MeshRunner 继承 BaseRunner |
+| 配置位置 | runner.from_any_pose.material | runner.from_any_pose.material |
+| RandomMaterial 初始化 | BaseRunner.__init__ | MeshRunner.__init__ |
+
+两者使用相同的 `RandomMaterial` 类和相同的配置结构，材质参数范围在配置文件中统一设置。
 
 ---
 

@@ -231,6 +231,7 @@ class MeshSequenceLoader(SequenceLoader):
     支持格式：
     - mesh_sequence: {'verts': [N, V, 3], 'faces': [F, 3]}
     - 推理输出: {'pred': [N, V, 3], 'cloth_faces': [F, 3], ...}
+    - 新 mesh_sequence: {'vertices': [N, V, 3], 'faces': [F, 3], 'num_frames': int, ...}
     """
     
     def load(self, path: str) -> SequenceData:
@@ -242,6 +243,10 @@ class MeshSequenceLoader(SequenceLoader):
         # 解析顶点和面
         if 'verts' in data:
             vertices = np.array(data['verts'])
+            faces = np.array(data['faces'])
+        elif 'vertices' in data:
+            # 新格式: {'vertices': [N, V, 3], 'faces': [F, 3]}
+            vertices = np.array(data['vertices'])
             faces = np.array(data['faces'])
         else:  # 'pred' in data
             vertices = np.array(data['pred'])
@@ -268,7 +273,7 @@ class MeshSequenceLoader(SequenceLoader):
     
     @staticmethod
     def can_load(data: dict) -> bool:
-        return 'verts' in data or 'pred' in data
+        return 'verts' in data or 'pred' in data or 'vertices' in data
 
 
 class SMPLSequenceLoader(SequenceLoader):
@@ -794,6 +799,58 @@ def view_obj_with_sequence(
         )
 
 
+def view_two_mesh_sequences(
+    mesh1_path: str,
+    mesh2_path: str,
+    mode: str = "overlay",
+    gender: str = "neutral",
+    config: ViewerConfig = None,
+    spacing: float = 2.0
+) -> None:
+    """
+    便捷函数：同时可视化两个 mesh 结构的 pkl 文件
+    
+    :param mesh1_path: 第一个 mesh pkl 文件路径
+    :param mesh2_path: 第二个 mesh pkl 文件路径
+    :param mode: 显示模式 "overlay"(叠加) 或 "side_by_side"(并排)
+    :param gender: SMPL 性别（如果需要）
+    :param config: 可视化配置
+    :param spacing: 并排模式下的间距
+    """
+    # 加载第一个 mesh 序列
+    print(f"加载 Mesh 1: {mesh1_path}")
+    loader1, detected_type1 = SequenceLoaderFactory.auto_detect(mesh1_path, gender=gender)
+    print(f"检测到格式: {detected_type1}")
+    mesh1_data = loader1.load(mesh1_path)
+    
+    # 加载第二个 mesh 序列
+    print(f"加载 Mesh 2: {mesh2_path}")
+    loader2, detected_type2 = SequenceLoaderFactory.auto_detect(mesh2_path, gender=gender)
+    print(f"检测到格式: {detected_type2}")
+    mesh2_data = loader2.load(mesh2_path)
+    
+    print(f"\nMesh 1 信息:\n{mesh1_data.summary()}")
+    print(f"\nMesh 2 信息:\n{mesh2_data.summary()}")
+    
+    viewer = AnimationViewer(config)
+    
+    if mode == "overlay":
+        # 叠加显示：两个序列在同一位置
+        viewer.view_with_overlay(
+            sequence_data=mesh1_data,
+            static_data=mesh2_data,
+            sequence_name=Path(mesh1_path).stem,
+            static_name=Path(mesh2_path).stem
+        )
+    else:
+        # 并排显示
+        viewer.view_multiple(
+            data_list=[mesh1_data, mesh2_data],
+            names=[Path(mesh1_path).stem, Path(mesh2_path).stem],
+            spacing=spacing
+        )
+
+
 # ============ 命令行接口 ============
 
 def parse_args():
@@ -820,6 +877,12 @@ def parse_args():
   
   # 同时显示 OBJ 和动画序列（并排模式）
   python AnimationViewer.py garment.obj --with-sequence body_motion.pkl --mode side_by_side
+  
+  # 同时显示两个 mesh pkl 文件（叠加模式）
+  python AnimationViewer.py body_sequence.pkl --mesh2 tshirt_sequence.pkl
+  
+  # 同时显示两个 mesh pkl 文件（并排模式）
+  python AnimationViewer.py body_sequence.pkl --mesh2 tshirt_sequence.pkl --mode side_by_side
 """
     )
     
@@ -876,6 +939,13 @@ def parse_args():
         default=2.0,
         help='并排模式下的间距 (默认: 2.0)'
     )
+    parser.add_argument(
+        '--mesh2', '-2',
+        type=str,
+        default=None,
+        metavar='PKL_PATH',
+        help='第二个 mesh pkl 文件路径（与主文件一起可视化）'
+    )
     
     return parser.parse_args()
 
@@ -911,8 +981,19 @@ def main():
     else:
         file_path = args.file_path
     
+    # 判断是否为双 mesh pkl 文件模式
+    if args.mesh2:
+        # 两个 mesh pkl 文件可视化
+        view_two_mesh_sequences(
+            mesh1_path=file_path,
+            mesh2_path=args.mesh2,
+            mode=args.mode,
+            gender=args.gender,
+            config=config,
+            spacing=args.spacing
+        )
     # 判断是否为 OBJ + 序列组合模式
-    if args.with_sequence:
+    elif args.with_sequence:
         # OBJ + 序列组合可视化
         if not file_path.lower().endswith('.obj'):
             print("警告: --with-sequence 参数通常与 OBJ 文件一起使用")

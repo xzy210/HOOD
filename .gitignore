@@ -170,3 +170,7 @@ Debug.ipynb
 
 Tests/checkpoints/
 Tests/data/
+
+# CodeBuddy
+.codebuddy/
+

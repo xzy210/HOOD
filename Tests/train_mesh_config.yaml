@@ -3,8 +3,8 @@
 experiment:
   name: mesh_training
   output_dir: 'Tests/checkpoints'              # Output directory in Tests folder
-  save_checkpoint_every: 1000
-  n_epochs: 10000
+  save_checkpoint_every: 2000
+  n_epochs: 100000
   checkpoint_path: null                        # Set path to resume from checkpoint
 
 runner:
@@ -38,6 +38,15 @@ dataloader:
       # Path to garment template .pkl file (relative to project root or absolute)
       # Note: Also supports .obj format - the system will auto-detect and convert
       garment_template_path: 'Tests/data/square_cloth.obj'
+      
+      # ============ Dual Mesh Sequence Mode (Body + Tshirt) ============
+      # When using dual mode, set these paths instead of pose_sequence_path
+      # Body mesh sequence pkl file path
+      body_sequence_path: 'Tests/data/vto_dataset_mesh/body_sequence/tshirt_shape00_01_01.pkl'
+      # Tshirt mesh sequence pkl file path
+      tshirt_sequence_path: 'Tests/data/vto_dataset_mesh/tshirt_sequence/tshirt_shape00_01_01.pkl'
+      # Static tshirt obj file path (for rest_pos)
+      tshirt_template_path: 'Tests/data/tshirt.obj'
       
       # Optional: path to obstacle auxiliary data file
       # obstacle_dict_file: 'Tests/obstacle_aux.pkl'
