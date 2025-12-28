@@ -422,6 +422,143 @@ def make_cloth_verts(self, body_pose, global_orient, transl, betas, garment_name
 | 随机起始帧 | 增加训练多样性，模型能学习从任意姿态开始仿真 |
 | LBS 初始化 | 衣服初始位置已经贴合人体，减少仿真初期的不稳定性 |
 
+### 自回归训练机制 (Autoregressive Training)
+
+**train.py 采用自回归训练方式，即模型在多步预测时，每一帧的输入位置来自上一帧的预测输出，而非 Ground Truth。**
+
+#### 核心参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `roll_max` | 5 | 最大自回归步数 |
+| `increase_roll_every` | 5000 | 每训练多少步增加一步自回归 |
+| `initial_ts` | 较小时间步 | 第一帧使用的时间步长 |
+| `regular_ts` | 正常时间步 | 后续帧使用的时间步长 |
+
+#### roll_steps 动态计算
+
+```python
+# runners/from_any_pose.py:351-352
+roll_steps = 1 + (global_step // training_module.mcfg.increase_roll_every)
+roll_steps = min(roll_steps, training_module.mcfg.roll_max)
+```
+
+**训练进度与 roll_steps 对应关系：**
+
+| global_step | roll_steps | 说明 |
+|-------------|------------|------|
+| 0 - 4999 | 1 | 单帧预测 |
+| 5000 - 9999 | 2 | 2步自回归 |
+| 10000 - 14999 | 3 | 3步自回归 |
+| 15000 - 19999 | 4 | 4步自回归 |
+| ≥20000 | 5 | 达到上限，保持5步 |
+
+#### 自回归训练流程
+
+```mermaid
+flowchart TD
+    subgraph "forward() 方法"
+        A[输入 sample, roll_steps] --> B[add_cloth_obj: 添加服装数据]
+        B --> C{遍历 i in range roll_steps}
+        
+        C --> D[collect_sample: 收集当前步样本]
+        D --> E{i == 0?}
+        E -->|是| F[collision_solver.solve: 碰撞处理]
+        E -->|否| G[跳过碰撞处理]
+        F --> H[model: 模型前向传播]
+        G --> H
+        H --> I[criterion_pass: 计算损失]
+        I --> J[prev_out_sample = sample_step.detach]
+        J --> K[optimizer_step: 更新参数]
+        K --> C
+    end
+```
+
+#### 关键代码实现
+
+**forward 方法** (runners/from_any_pose.py:281-304):
+
+```python
+def forward(self, sample, roll_steps=1, optimizer=None, scheduler=None) -> dict:
+    random_ts = (roll_steps == 1)
+    sample = self.add_cloth_obj(sample)
+
+    prev_out_sample = None
+    for i in range(roll_steps):  # 自回归循环
+        sample_step = self.collect_sample(sample, i, prev_out_sample, random_ts=random_ts)
+
+        if i == 0:
+            sample_step = self.collision_solver.solve(sample_step)
+
+        sample_step = self.model(sample_step)
+        loss_dict = self.criterion_pass(sample_step)
+        prev_out_sample = sample_step.detach()  # 保存预测结果，用于下一步输入
+
+        self.optimizer_step(loss_dict, optimizer, scheduler)
+
+    return {k: v.item() for k, v in loss_dict.items()}
+```
+
+**copy_from_prev 方法** (runners/utils/collector.py:16-26):
+
+```python
+def copy_from_prev(self, sample, prev_sample):
+    if prev_sample is None:
+        return sample
+    # 核心：将上一帧的预测位置作为当前帧的输入位置
+    sample['cloth'].prev_pos = prev_sample['cloth'].pos.detach()
+    sample['cloth'].pos = prev_sample['cloth'].pred_pos.detach()  # 预测位置 -> 当前位置
+
+    if self.obstacle:
+        sample['obstacle'].prev_pos = prev_sample['obstacle'].pos
+        sample['obstacle'].pos = prev_sample['obstacle'].target_pos
+
+    return sample
+```
+
+#### 数据流转图
+
+```mermaid
+flowchart LR
+    subgraph "Step 0 (第一帧)"
+        A0[pos: GT数据] --> B0[Model]
+        B0 --> C0[pred_pos]
+    end
+    
+    subgraph "Step 1 (第二帧)"
+        C0 -->|copy_from_prev| A1[pos: 上一帧pred_pos]
+        A1 --> B1[Model]
+        B1 --> C1[pred_pos]
+    end
+    
+    subgraph "Step 2 (第三帧)"
+        C1 -->|copy_from_prev| A2[pos: 上一帧pred_pos]
+        A2 --> B2[Model]
+        B2 --> C2[pred_pos]
+    end
+    
+    style C0 fill:#90EE90
+    style C1 fill:#90EE90
+    style C2 fill:#90EE90
+```
+
+#### collect_sample 各帧处理逻辑
+
+| rollout step | prev_pos | pos | target_pos | 时间步 |
+|--------------|----------|-----|------------|--------|
+| `i=0` (第一帧) | pos (50%概率) | GT数据 | pos (静止) | initial_ts / regular_ts |
+| `i=1` (第二帧) | pos | 上一帧的 pred_pos | lookup[0] | regular_ts |
+| `i≥2` (后续帧) | 上一帧的 pos | 上一帧的 pred_pos | lookup[i-1] | regular_ts |
+
+#### 课程学习设计优势
+
+| 设计 | 优势 |
+|------|------|
+| 渐进式增加 roll_steps | 训练初期专注单帧预测，避免误差累积导致的不稳定 |
+| 动态增长策略 | 随着训练进行，模型逐渐学会处理自身预测的误差 |
+| 最大步数限制 | 避免过长的自回归链导致梯度问题 |
+| 误差暴露 | 让模型在训练时就接触到自身预测的误差，提高推理稳定性 |
+
 ---
 
 ## 7. 完整数据加载流程
