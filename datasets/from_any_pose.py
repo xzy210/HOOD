@@ -430,8 +430,9 @@ class BareMeshBodyBuilder:
         """
         Add body vertices to the obstacle object in the sample
         """
-
-        pos = torch.FloatTensor(sequence_dict["verts"]).permute(1, 0, 2)
+        # Support both 'verts' and 'vertices' key names for compatibility
+        verts_key = "verts" if "verts" in sequence_dict else "vertices"
+        pos = torch.FloatTensor(sequence_dict[verts_key]).permute(1, 0, 2)
 
         sample['obstacle'].prev_pos = pos
         sample['obstacle'].pos = pos
