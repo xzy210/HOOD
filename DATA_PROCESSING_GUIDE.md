@@ -1329,3 +1329,250 @@ graph LR
 | 自定义FBX数据 | `from_any_pose` + mesh格式 | 无需转换为SMPL |
 
 ---
+
+## 11. 多服装类型联合训练
+
+HOOD 支持使用多种不同类型的服装进行联合训练，使单一图神经网络模型能够泛化到不同拓扑结构的服装。
+
+### 训练数据中的服装类型
+
+从官方训练数据 `train.csv` 可以看到，训练集包含 **7 种不同类型的服装**：
+
+| 服装类型 | 数量 | 描述 |
+|---------|------|------|
+| tshirt | 884 | T恤 |
+| longsleeve | 884 | 长袖 |
+| tank | 884 | 背心 |
+| tshirt_unzipped | 884 | 解扣T恤 |
+| dress | 884 | 连衣裙 |
+| shorts | 884 | 短裤 |
+| pants | 884 | 长裤 |
+
+**总计**：6188 个训练序列，均衡覆盖各种服装类型。
+
+### 服装字典 (garments_dict.pkl)
+
+所有服装的网格数据统一存储在 `garments_dict.pkl` 文件中：
+
+```python
+garments_dict = {
+    'tshirt': {
+        'rest_pos': np.array,     # [V1, 3] 静息位置
+        'faces': np.array,         # [F1, 3] 面片索引
+        'node_type': np.array,     # [V1, 1] 顶点类型
+        'lbs': dict,               # 线性蒙皮权重
+        'center': list,            # 图的中心节点
+        'coarse_edges': dict       # 预计算的粗糙边
+    },
+    'longsleeve': {
+        'rest_pos': np.array,     # [V2, 3] - 顶点数可能不同
+        'faces': np.array,         # [F2, 3] - 面片数可能不同
+        ...
+    },
+    'dress': { ... },
+    'pants': { ... },
+    # ... 其他服装类型
+}
+```
+
+**关键点**：不同服装类型的顶点数 (V) 和面片数 (F) 可以完全不同。
+
+### 数据加载机制
+
+#### 1. 数据分割文件 (datasplit.csv)
+
+```csv
+id,length,garment
+tshirt_shape14_104_11,135,tshirt
+longsleeve_shape08_128_02,42,longsleeve
+dress_shape03_91_61,91,dress
+pants_shape10_46_01,155,pants
+```
+
+每个序列关联一个特定的服装类型。
+
+#### 2. Dataset.__getitem__ 流程
+
+```python
+# datasets/postcvpr.py
+def __getitem__(self, item: int) -> HeteroData:
+    # 通过全局索引找到序列名、帧索引和服装名称
+    fname, idx, garment_name = self._find_idx(item)
+    
+    # 使用对应的服装类型构建样本
+    sample = self.loader.load_sample(fname, idx, garment_name, betas_id=betas_id)
+    sample['garment_name'] = garment_name  # 记录服装类型
+    
+    return sample
+```
+
+#### 3. GarmentBuilder 根据服装名称构建网格
+
+```python
+# datasets/postcvpr.py
+class GarmentBuilder:
+    def __init__(self, mcfg, garments_dict, garment_smpl_model_dict):
+        self.garments_dict = garments_dict  # 包含所有服装类型
+        self.garment_smpl_model_dict = garment_smpl_model_dict
+    
+    def build(self, sample, sequence_dict, idx, garment_name):
+        # 根据 garment_name 获取对应的服装数据
+        garment_dict = self.garments_dict[garment_name]
+        
+        # 添加服装特定的网格数据
+        sample = self.add_faces_and_edges(sample, garment_name)
+        sample = self.add_restpos(sample, sequence_dict, garment_name)
+        sample = self.add_coarse(sample, garment_name)
+        ...
+```
+
+### 图神经网络如何处理不同拓扑
+
+**核心问题**：不同服装的图结构（顶点数、边数、连接关系）完全不同，为什么可以用同一个 GNN 训练？
+
+#### 1. 局部消息传递机制
+
+图神经网络的核心操作是**消息传递**，它基于**局部邻域**工作：
+
+```python
+# models/core/baselines.py
+class GraphNetBlock(MessagePassing):
+    def message_mesh(self, node_features_i, node_features_j, edge_features):
+        # 每条边上的消息计算：只依赖两个端点的特征
+        in_features = torch.cat([node_features_i, node_features_j, edge_features], dim=-1)
+        out_features = self.mesh_edge_processor(in_features)
+        return out_features
+```
+
+**关键洞察**：
+- 消息传递操作**不依赖全局图大小**
+- 每条边的处理只涉及**两个端点的特征**和**边特征**
+- 使用**相同的 MLP** 处理所有边，无论来自哪种服装
+
+#### 2. 节点特征的统一编码
+
+所有服装节点使用相同的特征编码方式：
+
+```python
+# models/core/baselines.py
+class EncodeProcessDecode(nn.Module):
+    def _encode_nodes(self, sample):
+        cloth_features = sample['cloth'].node_features  # [V, n_nodefeatures]
+        
+        # 相同的 node_encoder 处理所有节点
+        cloth_latents = self.node_encoder(cloth_features)
+        return cloth_latents
+```
+
+**节点特征组成**（无论服装类型）：
+- 位置 `pos` [3]
+- 前一帧位置 `prev_pos` [3]
+- 静息位置 `rest_pos` [3]
+- 顶点类型嵌入 [4]
+- 材质参数 [4]
+
+#### 3. 边特征的统一编码
+
+```python
+def _encode_edges(self, sample):
+    mesh_edge_features = sample['cloth', 'mesh_edge', 'cloth'].features
+    
+    # 相同的 edge_encoder 处理所有边
+    mesh_edge_latents = self.edgeset_encoders['mesh'](mesh_edge_features)
+```
+
+**边特征组成**（基于相对位置，与服装类型无关）：
+- 相对位置 `pos_j - pos_i` [3]
+- 相对静息位置 `rest_pos_j - rest_pos_i` [3]
+- 边长度等
+
+### 联合训练流程图
+
+```mermaid
+graph TD
+    subgraph "训练数据"
+        A1[tshirt 序列]
+        A2[longsleeve 序列]
+        A3[dress 序列]
+        A4[pants 序列]
+    end
+    
+    subgraph "数据加载"
+        B[Dataset.__getitem__]
+        B1[GarmentBuilder.build<br/>garment_name='tshirt']
+        B2[GarmentBuilder.build<br/>garment_name='longsleeve']
+        B3[GarmentBuilder.build<br/>garment_name='dress']
+        B4[GarmentBuilder.build<br/>garment_name='pants']
+    end
+    
+    subgraph "统一的 HeteroData"
+        C1["HeteroData<br/>cloth.pos: [V1, 3]<br/>mesh_edge: [2, E1]"]
+        C2["HeteroData<br/>cloth.pos: [V2, 3]<br/>mesh_edge: [2, E2]"]
+        C3["HeteroData<br/>cloth.pos: [V3, 3]<br/>mesh_edge: [2, E3]"]
+        C4["HeteroData<br/>cloth.pos: [V4, 3]<br/>mesh_edge: [2, E4]"]
+    end
+    
+    subgraph "共享的 GNN"
+        D[EncodeProcessDecode]
+        D1[node_encoder<br/>MLP: n_features → latent]
+        D2[edge_encoder<br/>MLP: n_features → latent]
+        D3[GraphNetBlock × N<br/>消息传递]
+        D4[decoder<br/>MLP: latent → 3]
+    end
+    
+    A1 --> B1 --> C1
+    A2 --> B2 --> C2
+    A3 --> B3 --> C3
+    A4 --> B4 --> C4
+    
+    C1 --> D
+    C2 --> D
+    C3 --> D
+    C4 --> D
+    
+    D --> D1 --> D3
+    D --> D2 --> D3
+    D3 --> D4
+```
+
+### 设计优势
+
+| 设计 | 优势 |
+|------|------|
+| 局部消息传递 | 模型不依赖全局图大小，可处理任意顶点数的服装 |
+| 统一特征编码 | 使用相同的编码器处理不同服装的节点/边，参数共享 |
+| 多服装联合训练 | 模型学习到通用的布料物理规律，而非特定服装的模式 |
+| 均衡数据分布 | 各服装类型数量相等，避免训练偏向 |
+
+### 泛化能力
+
+由于采用了上述设计，训练好的模型可以：
+
+1. **处理训练中见过的服装类型**：直接使用对应的网格拓扑
+2. **泛化到新的服装类型**：只要新服装使用相同的特征编码方式，模型就能处理
+3. **处理不同分辨率的网格**：顶点数量变化不影响模型推理
+
+### 训练配置示例
+
+```yaml
+# configs/postcvpr.yaml
+dataset:
+  postcvpr:
+    garment_dict_file: 'garments_dict.pkl'  # 包含所有服装类型
+    split_path: 'datasplits/train.csv'       # 包含多种服装的序列列表
+    
+model:
+  postcvpr:
+    # 模型参数与服装类型无关
+    latent_size: 128
+    message_passing_steps: 15
+```
+
+### 注意事项
+
+1. **服装字典一致性**：所有训练和推理使用的服装必须在 `garments_dict.pkl` 中有对应条目
+2. **特征维度一致**：所有服装的节点特征和边特征维度必须相同
+3. **坐标系统一致**：所有服装使用相同的坐标系（右手系，单位：米）
+4. **LBS 权重**：每种服装需要预计算好的 LBS 蒙皮权重用于姿态变换
+
+---
