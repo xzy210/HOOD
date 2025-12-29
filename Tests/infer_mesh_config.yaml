@@ -1,0 +1,97 @@
+# Configuration file for mesh-based inference
+# Use with: python Tests/infer_mesh.py --config Tests/infer_mesh_config.yaml
+#
+# 命令行参数会覆盖配置文件中的设置
+
+experiment:
+  name: mesh_inference
+
+# ============ 资产路径配置 ============
+# 以下路径可以是绝对路径，或相对于项目根目录的相对路径
+
+inference:
+  # Body mesh序列文件 (.pkl)
+  # 格式: {'vertices': [N, V, 3], 'faces': [F, 3], 'num_frames': int}
+  body_sequence: 'Tests/data/vto_dataset_mesh/body_sequence/tshirt_shape00_01_01.pkl'
+  
+  # 布料静态模板文件 (.obj 或 .pkl)，用于 rest_pos
+  garment_template: 'Tests/data/tshirt.pkl'
+  
+  # 布料第一帧位置文件 (.obj 或 .pkl)，需要与body序列第一帧对齐
+  garment_init: 'Tests/data/tshirt_transformed.obj'
+  
+  # 模型checkpoint路径
+  checkpoint: 'hood_data/experiments/20251228_160805/checkpoints/step_0000030000.pth'
+  
+  # 输出文件路径 (留空则自动生成)
+  output: 'Tests/data/output_inference.pkl'
+  
+  # 推理步数 (-1 表示全部帧)
+  n_steps: -1
+  
+  # 是否跳过loss计算以加速推理
+  bare: false
+
+# ============ Runner 配置 ============
+runner:
+  from_any_pose:
+    # Runner 参数
+    device: 'cuda:0'
+    warmup_steps: 100
+    increase_roll_every: 5000
+    roll_max: 5
+    push_eps: 2e-3
+    grad_clip: 1.0
+    overwrite_pos_every_step: false
+    initial_ts: 0.3333333333333333  # 1/3
+    regular_ts: 0.03333333333333333  # 1/30
+    
+    # 材料属性
+    material:
+      # 材料参数范围 (训练时随机采样)
+      lame_mu_min: 15909
+      lame_mu_max: 63636
+      lame_lambda_min: 3535.414406069427
+      lame_lambda_max: 93333.73508005822
+      bending_coeff_min: 6.370782056371576e-08
+      bending_coeff_max: 0.0013139737991266374
+      density_min: 4.34e-2
+      density_max: 7e-1
+      bending_multiplier: 1.0
+      
+      # 覆盖参数 (推理时使用固定值，与 Inference.ipynb 保持一致)
+      # 设为 null 则随机采样
+      density_override: 0.20022
+      lame_mu_override: 23600.0
+      lame_lambda_override: 44400
+      bending_coeff_override: 3.96e-05
+
+# Criterions 用于推理时的loss计算 (可选)
+# 使用 bare: true 或 --bare 参数可跳过loss计算
+criterions:
+  postcvpr.mataug.stretching_energy:
+  postcvpr.inertia:
+  postcvpr.gravitational_energy:
+    z_axis: 1
+  postcvpr.collision_penalty:
+    weight_start: 5e+3
+    weight_max: 5e+5
+    eps: 2e-3
+    start_rampup_iteration: 50000
+    n_rampup_iterations: 100000
+  postcvpr.mataug.bending_energy:
+  postcvpr.friction_energy:
+    mu: 0.5
+    friction_radius: 3e-3
+
+# 模型架构配置
+model:
+  postcvpr:
+    core_model: 'postcvpr'
+    architecture: "f,c0|f,c0|f,c0|d:c0,c1|c0,c1|c0,c1|d:c1|c1|c1|u:c0,c1|c0,c1|c0,c1|u:f,c0|f,c0|f,c0"
+    collision_radius: 3e-2
+    k_world_edges: 1
+    n_coarse_levels: 3
+
+device: 'cuda:0'
+n_coarse_levels: 3

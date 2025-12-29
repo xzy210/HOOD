@@ -159,7 +159,7 @@ def main():
     # Paths
     data_dir = os.path.join(project_root, 'Tests', 'data')
     garment_obj_path = os.path.join(data_dir, 'tshirt.obj')
-    smpl_sequence_path = os.path.join(data_dir, '01_01.pkl')
+    smpl_sequence_path = os.path.join(project_root, 'hood_data','vto_dataset','smpl_parameters','tshirt_shape00_01_01.pkl')
     output_obj_path = os.path.join(data_dir, 'tshirt_transformed.obj')
     
     # SMPL model path
