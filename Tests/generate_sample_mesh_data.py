@@ -56,11 +56,16 @@ def create_sphere_mesh(radius: float = 0.3, n_subdivisions: int = 16):
     faces = []
     
     # Top cap faces
+    # NOTE: Face winding order must be counter-clockwise (CCW) when viewed from outside (+Y direction)
+    # to ensure face normals point outward (toward +Y)
     for j in range(n_lon):
         next_j = (j + 1) % n_lon
-        faces.append([0, 1 + j, 1 + next_j])
+        # Changed from [0, 1+j, 1+next_j] to [0, 1+next_j, 1+j] for correct outward normal
+        faces.append([0, 1 + next_j, 1 + j])
     
     # Middle faces
+    # NOTE: Face winding order must be counter-clockwise (CCW) when viewed from outside
+    # to ensure face normals point outward (away from sphere center)
     for i in range(n_lat - 2):
         for j in range(n_lon):
             next_j = (j + 1) % n_lon
@@ -69,15 +74,19 @@ def create_sphere_mesh(radius: float = 0.3, n_subdivisions: int = 16):
             v2 = 1 + (i + 1) * n_lon + j
             v3 = 1 + (i + 1) * n_lon + next_j
             
-            faces.append([v0, v2, v1])
-            faces.append([v1, v2, v3])
+            # Changed from [v0, v2, v1] to [v0, v1, v2] for CCW winding
+            faces.append([v0, v1, v2])
+            faces.append([v1, v3, v2])
     
     # Bottom cap faces
+    # NOTE: Face winding order must be counter-clockwise (CCW) when viewed from outside (-Y direction)
+    # to ensure face normals point outward (toward -Y)
     bottom_pole = len(verts) - 1
     last_ring_start = 1 + (n_lat - 2) * n_lon
     for j in range(n_lon):
         next_j = (j + 1) % n_lon
-        faces.append([bottom_pole, last_ring_start + next_j, last_ring_start + j])
+        # Changed from [pole, j+1, j] to [pole, j, j+1] for CCW winding when viewed from -Y
+        faces.append([bottom_pole, last_ring_start + j, last_ring_start + next_j])
     
     faces = np.array(faces, dtype=np.int64)
     
@@ -342,15 +351,15 @@ def main():
             sphere_radius=sphere_radius
         )
     
-    if args.format in ['pkl', 'both']:
-        garment_pkl_path = output_dir / 'square_cloth.pkl'
-        create_square_cloth_pkl(
-            str(garment_pkl_path),
-            grid_size=args.grid_size,
-            cloth_size=args.cloth_size,
-            height_above_sphere=args.height_above_sphere,
-            sphere_radius=sphere_radius
-        )
+    # if args.format in ['pkl', 'both']:
+    #     garment_pkl_path = output_dir / 'square_cloth.pkl'
+    #     create_square_cloth_pkl(
+    #         str(garment_pkl_path),
+    #         grid_size=args.grid_size,
+    #         cloth_size=args.cloth_size,
+    #         height_above_sphere=args.height_above_sphere,
+    #         sphere_radius=sphere_radius
+    #     )
     
     print("\n" + "=" * 60)
     print("Sample data generation completed!")
