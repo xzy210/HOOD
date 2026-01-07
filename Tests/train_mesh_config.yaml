@@ -9,6 +9,25 @@ experiment:
 
 runner:
   from_any_pose:
+    # Training parameters
+    warmup_steps: 100                         # Number of steps to warm up the normalization statistics
+    increase_roll_every: 5000                 # Increase roll steps every N iterations
+    roll_max: 5                               # Maximum number of autoregressive steps
+    push_eps: 2e-3                            # Collision solver threshold
+    grad_clip: 1.0                            # Gradient clipping norm
+    overwrite_pos_every_step: false           # Whether to overwrite canonical poses
+    initial_ts: 0.333333                      # Time step for first frame (1/3)
+    regular_ts: 0.033333                      # Regular time step (1/30)
+    
+    # Optimizer config
+    optimizer:
+      lr: 1e-4                        # initial learning rate
+      decay_rate: 0.1                 # decay multiplier for the scheduler
+      decay_min: 0                    # minimal decay
+      decay_steps: 5000000            # number of steps for one decay step
+      step_start: 0                   # step to start from (used to resume training)
+    
+    # Material parameters
     material:
       lame_mu_min: 15909
       lame_mu_max: 63636
@@ -18,38 +37,26 @@ runner:
       bending_coeff_max: 0.0013139737991266374
       density_min: 4.34e-2
       density_max: 7e-1
+      bending_multiplier: 1.0
+
+      density_override: null    # 该设置成null还是none?????
+      lame_mu_override: null
+      lame_lambda_override: null
+      bending_coeff_override: null
 
 dataloader:
   num_workers: 0                              # Set to 0 to avoid multiprocessing issues
   batch_size: 1
   pyg_data: True
   dataset:
-    from_any_pose:
-      # SMPL model is not needed for mesh format, but required by the codebase
-      smpl_model: 'smpl/SMPL_FEMALE.pkl'
-      
-      # IMPORTANT: Set to 'mesh' for mesh format input
-      pose_sequence_type: "mesh"
-      
-      # Path to your mesh sequence .pkl file (relative to project root or absolute)
-      # Format: {'verts': [N, V, 3], 'faces': [F, 3]}
-      pose_sequence_path: 'Tests/data/sphere_sequence.pkl'
-      
-      # Path to garment template .pkl file (relative to project root or absolute)
-      # Note: Also supports .obj format - the system will auto-detect and convert
-      garment_template_path: 'Tests/data/square_cloth.obj'
-      
+    from_any_pose:      
       # ============ Dual Mesh Sequence Mode (Body + Tshirt) ============
-      # When using dual mode, set these paths instead of pose_sequence_path
       # Body mesh sequence pkl file path
       body_sequence_path: 'Tests/data/vto_dataset_mesh/body_sequence/tshirt_shape00_01_01.pkl'
       # Tshirt mesh sequence pkl file path
       tshirt_sequence_path: 'Tests/data/vto_dataset_mesh/tshirt_sequence/tshirt_shape00_01_01.pkl'
       # Static tshirt obj file path (for rest_pos)
       tshirt_template_path: 'Tests/data/tshirt.obj'
-      
-      # Optional: path to obstacle auxiliary data file
-      # obstacle_dict_file: 'Tests/obstacle_aux.pkl'
       
       n_coarse_levels: 3
       pinned_verts: true

@@ -4,10 +4,9 @@ Custom utilities for mesh-based training that work with the existing HOOD framew
 without modifying core library files.
 
 This module provides:
-1. MeshDatasetWrapper: Wraps the dataset to properly format mesh sequence data
-2. DualMeshDatasetWrapper: Dataset wrapper for body + tshirt mesh sequence training
-3. MeshRunner: Custom runner that handles mesh data format in collect_sample
-4. mesh_run_epoch: Custom training loop with loss logging and TensorBoard support
+1. DualMeshDatasetWrapper: Dataset wrapper for body + tshirt mesh sequence training
+2. MeshRunner: Custom runner that handles mesh data format in collect_sample
+3. mesh_run_epoch: Custom training loop with loss logging and TensorBoard support
 """
 
 import os
@@ -39,80 +38,6 @@ from utils.common import move2device, add_field_to_pyg_batch, save_checkpoint, p
 from utils.mesh_creation import obj2template
 from utils.coarse import make_coarse_edges
 from utils.defaults import DEFAULTS
-
-
-class MeshDatasetWrapper:
-    """
-    Wrapper for the mesh dataset that properly formats the data for training.
-    
-    The core issue is that BareMeshBodyBuilder stores all frames in pos/prev_pos/target_pos
-    as [V, N, 3], but the training pipeline expects either:
-    1. Single frame data [V, 3] with lookup field for future frames, or
-    2. Properly offset wholeseq data that can be processed by sequence2sample
-    
-    This wrapper converts the data to format 2, which is compatible with
-    the wholeseq validation flow but also works for training when we
-    call sequence2sample in collect_sample.
-    """
-    
-    def __init__(self, base_dataset):
-        """
-        Args:
-            base_dataset: The original dataset from from_any_pose.py
-        """
-        self.base_dataset = base_dataset
-        
-        # Load a sample to determine sequence length
-        # The obstacle.pos is [V, N, 3] where N is number of frames
-        sample = base_dataset[0]
-        if hasattr(sample['obstacle'], 'pos') and sample['obstacle'].pos.dim() == 3:
-            n_frames = sample['obstacle'].pos.shape[1]
-            # We need at least 3 frames for temporal offset (prev, current, target)
-            # After offset: prev_pos uses frames [0, N-3], pos uses [1, N-2], target_pos uses [2, N-1]
-            # So the valid sequence length is N - 2
-            self._len = max(1, n_frames - 2)
-        else:
-            self._len = 1
-        
-        print(f"[MeshDatasetWrapper] Sequence has {n_frames} frames, {self._len} valid training frames per epoch")
-    
-    def __len__(self):
-        return self._len
-    
-    def __getitem__(self, item: int) -> HeteroData:
-        """
-        Load and transform the sample to have proper temporal offsets.
-        
-        Original format from BareMeshBodyBuilder:
-            obstacle.prev_pos = pos = target_pos = [V, N, 3] (all same)
-        
-        Transformed format (wholeseq style):
-            obstacle.prev_pos = all_verts[:, :-2, :]  # frames [0, N-3]
-            obstacle.pos = all_verts[:, 1:-1, :]      # frames [1, N-2]
-            obstacle.target_pos = all_verts[:, 2:, :] # frames [2, N-1]
-        
-        This allows sequence2sample to correctly extract single frames with
-        proper temporal relationships.
-        """
-        sample = self.base_dataset[item]
-        
-        # Transform obstacle (body) data if it's in wholeseq format
-        if hasattr(sample['obstacle'], 'pos') and sample['obstacle'].pos.dim() == 3:
-            all_verts = sample['obstacle'].pos  # [V, N, 3]
-            N = all_verts.shape[1]
-            
-            if N >= 3:
-                # Apply proper temporal offsets
-                sample['obstacle'].prev_pos = all_verts[:, :-2, :].clone()
-                sample['obstacle'].pos = all_verts[:, 1:-1, :].clone()
-                sample['obstacle'].target_pos = all_verts[:, 2:, :].clone()
-            else:
-                # If sequence is too short, just duplicate
-                sample['obstacle'].prev_pos = all_verts.clone()
-                sample['obstacle'].pos = all_verts.clone()
-                sample['obstacle'].target_pos = all_verts.clone()
-        
-        return sample
 
 
 class DualMeshDatasetWrapper:
@@ -384,19 +309,6 @@ class MeshRunner(BaseRunner):
         sample_step = self.sample_collector.add_velocity(sample_step, prev_out_dict)
         sample_step = self.sample_collector.add_timestep(sample_step, ts)
         return sample_step
-
-
-def wrap_dataset(dataset):
-    """
-    Convenience function to wrap a dataset with MeshDatasetWrapper.
-    
-    Args:
-        dataset: Original dataset from from_any_pose.py
-    
-    Returns:
-        MeshDatasetWrapper instance
-    """
-    return MeshDatasetWrapper(dataset)
 
 
 def create_mesh_runner(model, criterion_dict, mcfg):
