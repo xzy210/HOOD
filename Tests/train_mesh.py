@@ -19,13 +19,15 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from utils.arguments import create_modules, load_module
+from utils.arguments import load_module
 
 # Import custom mesh training utilities
-from Tests.mesh_training_utils import (
+from Tests.Modules import (
     DualMeshDatasetWrapper, MeshRunner, 
-    mesh_run_epoch, create_tensorboard_writer
+    MaterialConfig, OptimConfig, Config
 )
+from Tests.Modules.utils import create_tensorboard_writer
+from Tests.Modules.MeshRunner import run_epoch
 
 
 def main():
@@ -41,8 +43,8 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='Tests/train_mesh_config.yaml',
-        help='Path to the config file (default: Tests/train_mesh_config.yaml)'
+    default='Tests/Modules/MeshTrainConfig.yaml',
+    help='Path to the config file (default: Tests/Modules/MeshTrainConfig.yaml)'
     )
     parser.add_argument(
         '--checkpoint',
@@ -103,19 +105,29 @@ def main():
     print("=" * 60)
     print(f"\nLoading config from: {args.config}")
     
-    # Create default config structure
+    # Create default config structure using dataclasses
     from utils.arguments import struct_fix
     
-    default_config = OmegaConf.structured({
+    # Create structured config from dataclasses
+    default_runner_cfg = OmegaConf.structured(Config())
+    
+    default_config = OmegaConf.create({
         'config': config_path,
         'device': 'cuda:0',
-        'dataloader': {'num_workers': 0, 'batch_size': 1, 'pyg_data': True},
         'experiment': {
             'name': 'mesh_training',
-            'save_checkpoint_every': 100000,
-            'n_epochs': 200,
+            'output_dir': 'Tests/checkpoints',
+            'save_checkpoint_every': 2000,
+            'n_epochs': 100000,
             'checkpoint_path': None,
             'max_iter': None
+        },
+        'runner': default_runner_cfg,
+        'dataset': {
+            'body_sequence_path': None,
+            'tshirt_sequence_path': None,
+            'tshirt_template_path': None,
+            'n_coarse_levels': 3
         },
         'detect_anomaly': False,
         'step_start': 0
@@ -162,12 +174,12 @@ def main():
     if args.body_sequence:
         body_sequence_path = os.path.abspath(args.body_sequence)
     else:
-        body_sequence_path = resolve_path(config.dataloader.dataset.from_any_pose.body_sequence_path)
+        body_sequence_path = resolve_path(config.dataset.body_sequence_path)
     
     if args.tshirt_sequence:
         tshirt_sequence_path = os.path.abspath(args.tshirt_sequence)
     else:
-        tshirt_sequence_path = resolve_path(config.dataloader.dataset.from_any_pose.tshirt_sequence_path)
+        tshirt_sequence_path = resolve_path(config.dataset.tshirt_sequence_path)
     
     # Use tshirt_template if provided, otherwise try garment arg or config
     if args.tshirt_template:
@@ -175,7 +187,7 @@ def main():
     elif args.garment:
         garment_template_path = os.path.abspath(args.garment)
     else:
-        garment_template_path = resolve_path(config.dataloader.dataset.from_any_pose.tshirt_template_path)
+        garment_template_path = resolve_path(config.dataset.tshirt_template_path)
     
     print(f"\nBody sequence: {body_sequence_path}")
     print(f"Tshirt sequence: {tshirt_sequence_path}")
@@ -200,8 +212,8 @@ def main():
     model_cfg = config.model[model_name]
     model = modules['model'].create(model_cfg)
     
-    # Create runner (we need mcfg from config)
-    runner_cfg = config.runner.from_any_pose
+    # Get runner config (now directly from config.runner, matches Config dataclass)
+    runner_cfg = config.runner
     
     # Create criterion dict
     criterion_dict = {}
@@ -216,25 +228,16 @@ def main():
     from utils.cloth_and_material import ClothMatAug
     training_module.cloth_obj = ClothMatAug(None, always_overwrite_mass=True)
     
-    # Create optimizer and scheduler
+    # Create optimizer and scheduler using config from runner_cfg.optimizer
     from torch.optim import Adam
     from torch.optim.lr_scheduler import LambdaLR
     
-    # Default optimizer config
-    lr = 1e-4
-    decay_rate = 0.1
-    decay_steps = 200000
-    decay_min = 0.0
-    step_start = 0
-    
-    # Override with config if available
-    if hasattr(runner_cfg, 'optimizer'):
-        opt_cfg = runner_cfg.optimizer
-        lr = getattr(opt_cfg, 'lr', lr)
-        decay_rate = getattr(opt_cfg, 'decay_rate', decay_rate)
-        decay_steps = getattr(opt_cfg, 'decay_steps', decay_steps)
-        decay_min = getattr(opt_cfg, 'decay_min', decay_min)
-        step_start = getattr(opt_cfg, 'step_start', step_start)
+    opt_cfg = runner_cfg.optimizer
+    lr = opt_cfg.lr
+    decay_rate = opt_cfg.decay_rate
+    decay_steps = opt_cfg.decay_steps
+    decay_min = opt_cfg.decay_min
+    step_start = opt_cfg.step_start
     
     optimizer = Adam(training_module.parameters(), lr=lr)
     
@@ -252,7 +255,7 @@ def main():
     }
     
     # Get n_coarse_levels from config
-    n_coarse_levels = config.dataloader.dataset.from_any_pose.get('n_coarse_levels', 4)
+    n_coarse_levels = config.dataset.get('n_coarse_levels', 3)
     
     # Create DualMeshDatasetWrapper
     print("Creating DualMeshDatasetWrapper for body + tshirt training...")
@@ -327,7 +330,7 @@ def main():
             print("-" * 60)
             
             dataloader = dataloader_m.create_dataloader()
-            global_step = mesh_run_epoch(
+            global_step = run_epoch(
                 training_module, aux_modules, dataloader, i, config,
                 global_step=global_step, writer=writer, log_every=args.log_every
             )
