@@ -1319,6 +1319,227 @@ flowchart TB
 
 ---
 
+## 8. postcvpr、from_any_pose、mesh 三种训练模式对比
+
+本节详细分析三种训练模式在数据处理、target_pos 使用、以及训练目标上的关键区别。
+
+### 8.1 target_pos 的真正用途
+
+#### 8.1.1 关键结论
+
+| target_pos 类型 | 用途 | 是否用于监督? |
+|----------------|------|--------------|
+| **cloth.target_pos** | 处理固定顶点（衣领、袖口等） | ❌ 否 |
+| **obstacle.target_pos** | World Edge 特征 + 碰撞损失 | ❌ 否（只是碰撞约束） |
+
+> **重要结论**：`target_pos` 的本质是「下一帧的参考位置」，但**不是**「监督学习的 Ground Truth」。
+
+#### 8.1.2 cloth.target_pos 的三个用途
+
+**用途一：`replace_pinned_verts()` - 输入预处理**
+
+```python
+def replace_pinned_verts(self, sample):
+    target_pos = cloth_sample.target_pos
+    pinned_mask = nodetype == NodeType.HANDLE  # 固定顶点掩码
+    
+    # 固定顶点的当前位置被替换为 target_pos
+    pos = pos * torch.logical_not(pinned_mask) + target_pos * pinned_mask
+```
+
+**用途二：`get_position()` - 输出后处理**
+
+```python
+def get_position(self, sample, is_training):
+    pinned_mask = vertex_type == NodeType.HANDLE
+    
+    # 固定顶点的预测速度 = target 与当前位置的差
+    target_velocity = target_position - cur_position
+    pred_velocity = pred_velocity * ~pinned_mask + target_velocity * pinned_mask
+    
+    # 固定顶点的预测位置 = target_pos（不使用模型预测）
+    position = position * ~pinned_mask + target_position * pinned_mask
+```
+
+**用途三：`create_world_edge_set()` - 人体边特征**
+
+```python
+def create_world_edge_set(self, sample, is_training):
+    obstacle_next_pos = sample['obstacle'].target_pos  # 人体下一帧位置
+    
+    # 特征包含下一帧相对位置，让模型预知人体运动
+    relative_next_pos = senders_pos - receivers_next_pos
+```
+
+#### 8.1.3 obstacle.target_pos 用于碰撞损失
+
+```python
+def calc_loss(self, example):
+    obstacle_next_pos = example['obstacle'].target_pos  # 人体下一帧位置
+    next_pos = example['cloth'].pred_pos               # 布料预测位置
+    
+    # 检测布料预测位置是否穿透人体下一帧
+    distance = ((next_pos - nn_points) * nn_normals).sum(dim=-1)
+    interpenetration = torch.maximum(eps - distance, 0)
+```
+
+---
+
+### 8.2 三种模式的数据获取方式对比
+
+#### 8.2.1 postcvpr 模式：lookup 动态获取
+
+```mermaid
+flowchart LR
+    A[Dataset 预加载] --> B["lookup[:, L, 3]<br/>预计算未来L帧"]
+    B --> C[Runner.collect_sample]
+    C --> D["lookup2target(idx)"]
+    D --> E["target_pos = lookup[:, idx]"]
+```
+
+- **数据源**：从 VTO 数据集加载，使用 CSV 划分多序列多衣物
+- **target_pos 获取**：通过 `lookup2target()` 从预加载的 lookup 表动态获取第 idx 帧
+- **适用场景**：大规模训练
+
+#### 8.2.2 from_any_pose / mesh 模式：固定第0帧
+
+```mermaid
+flowchart LR
+    A[Dataset 加载序列] --> B["sequence[:, N, 3]<br/>完整序列"]
+    B --> C[Runner.collect_sample]
+    C --> D["sequence2sample(idx)<br/>no_target=True"]
+    D --> E["target_pos = sequence[:, 0]<br/>始终第0帧"]
+```
+
+- **数据源**：单序列文件 + 静态衣物模板
+- **target_pos 获取**：通过 `SampleCollector(mcfg, no_target=True)` 强制使用第0帧
+- **适用场景**：推理/演示，从任意初始姿态开始模拟
+
+#### 8.2.3 SampleCollector 的关键差异
+
+```python
+# postcvpr 模式
+self.sample_collector = SampleCollector(mcfg)  # no_target=False（默认）
+
+# from_any_pose / mesh 模式
+self.sample_collector = SampleCollector(mcfg, no_target=True)
+```
+
+`no_target=True` 的影响体现在 `sequence2sample()` 方法中：
+
+```python
+def sequence2sample(self, sample, idx):
+    for obj in ['cloth', 'obstacle']:
+        for key in ['pos', 'prev_pos', 'target_pos']:
+            if self.no_target and obj == 'cloth' and key == 'target_pos':
+                idx_c = 0  # 关键：强制使用第0帧作为 target_pos
+            else:
+                idx_c = idx  # 正常使用当前帧
+            sample[obj][key] = sample[obj][key][:, idx_c]
+```
+
+---
+
+### 8.3 三种模式的训练目标对比
+
+#### 8.3.1 共同点：无监督物理驱动
+
+三种模式的损失函数**完全相同**，都是物理能量最小化：
+
+| 损失项 | 物理含义 | 是否使用 target_pos |
+|--------|----------|---------------------|
+| `inertia` | 惯性能量 | ❌ |
+| `stretch` | 拉伸能量 | ❌ |
+| `bending` | 弯曲能量 | ❌ |
+| `gravity` | 重力势能 | ❌ |
+| `collision` | 碰撞惩罚 | ✅ (obstacle.target_pos) |
+
+**关键证据**：没有任何损失函数将 `cloth.target_pos` 作为监督目标与 `cloth.pred_pos` 计算 MSE/L1 损失。
+
+#### 8.3.2 差异点：初始化策略
+
+| 模式 | 首帧初始化 | collect_sample_wholeseq 差异 |
+|------|-----------|------------------------------|
+| **postcvpr** | `target2pos()` → `pos2prev()` | 从 target_pos 复制到 pos |
+| **from_any_pose** | 仅 `pos2prev()` | 直接使用静态模板位置 |
+| **mesh** | 仅 `pos2prev()` | 直接使用静态模板位置 |
+
+```python
+# postcvpr collect_sample_wholeseq
+if index == 0:
+    sample_step = self.sample_collector.target2pos(sample_step)  # 额外步骤
+    sample_step = self.sample_collector.pos2prev(sample_step)
+
+# from_any_pose / mesh collect_sample_wholeseq
+if index == 0:
+    # sample_step = self.sample_collector.target2pos(sample_step)  # 无此步骤
+    sample_step = self.sample_collector.pos2prev(sample_step)
+```
+
+---
+
+### 8.4 数据流对比图
+
+```mermaid
+flowchart TB
+    subgraph postcvpr_flow["postcvpr 模式"]
+        PC1["Dataset<br/>CSV多序列"] --> PC2["Loader<br/>GarmentSMPL动态生成"]
+        PC2 --> PC3["lookup表<br/>预计算未来L帧"]
+        PC3 --> PC4["Runner.collect_sample<br/>lookup2target(idx)"]
+        PC4 --> PC5["target_pos<br/>= 第idx帧"]
+    end
+    
+    subgraph from_any_pose_flow["from_any_pose / mesh 模式"]
+        FA1["Dataset<br/>单序列文件"] --> FA2["Loader<br/>静态模板顶点"]
+        FA2 --> FA3["完整序列<br/>[V, N, 3]"]
+        FA3 --> FA4["Runner.collect_sample<br/>sequence2sample(idx)"]
+        FA4 --> FA5["target_pos<br/>= 第0帧（固定）"]
+    end
+    
+    PC5 --> LOSS["物理损失函数<br/>（无监督）"]
+    FA5 --> LOSS
+    
+    style PC5 fill:#dff,stroke:#333
+    style FA5 fill:#fdf,stroke:#333
+    style LOSS fill:#ffd,stroke:#333
+```
+
+---
+
+### 8.5 完整对比总结表
+
+| 维度 | postcvpr | from_any_pose | mesh |
+|------|----------|---------------|------|
+| **设计目标** | 大规模训练 | 推理/演示 | Mesh序列训练 |
+| **数据规模** | 多序列、多衣物 | 单序列、单衣物 | 单序列、双Mesh |
+| **衣物顶点** | GarmentSMPL 动态生成 | 静态模板 | 静态模板 |
+| **人体输入** | 仅 SMPL 参数 | SMPL 或 Mesh | Mesh |
+| **target_pos 来源** | lookup 表动态获取 | 固定第0帧 | 固定第0帧 |
+| **SampleCollector** | `no_target=False` | `no_target=True` | `no_target=True` |
+| **首帧初始化** | `target2pos()` + `pos2prev()` | 仅 `pos2prev()` | 仅 `pos2prev()` |
+| **训练模式** | 有监督数据增强 | 无 | 无 |
+| **Runner 继承** | 基类 | 继承 postcvpr | 继承 from_any_pose |
+
+---
+
+### 8.6 设计原因总结
+
+1. **postcvpr 使用 lookup**：
+   - 训练时需要知道人体未来运动轨迹，用于碰撞预测
+   - 固定顶点（衣领、袖口）需要跟随人体运动，必须知道下一帧位置
+
+2. **from_any_pose / mesh 使用固定第0帧**：
+   - 推理时从任意初始姿态开始，不依赖预设轨迹
+   - 无固定顶点约束，不需要知道布料的 target_pos
+   - 人体 target_pos 仍然需要（用于碰撞检测特征）
+
+3. **三种模式的统一性**：
+   - 损失函数完全相同（物理能量最小化）
+   - 模型架构完全相同（EncodeProcessDecode）
+   - 差异仅在数据准备和初始化策略
+
+---
+
 ## 总结
 
 **简单来说**：
