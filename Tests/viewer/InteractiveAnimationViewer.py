@@ -34,7 +34,7 @@ except ImportError:
     from tkinter import Tk, filedialog as tk_filedialog
 
 # ============ 路径配置 ============
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent  # HOOD project root
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Windows DLL 加载顺序问题修复

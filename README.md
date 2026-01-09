@@ -318,6 +318,138 @@ See the [RepoIntro.md](RepoIntro.md) for more details on the repository structur
 
 
 
+## Mesh Mode Training
+
+Mesh mode allows training HOOD with pre-computed mesh sequences (body mesh + cloth mesh) instead of SMPL pose sequences. This is useful when you have mesh animation data from other sources.
+
+### Data Format
+
+Mesh mode requires paired body and cloth mesh sequences in `.pkl` format:
+
+- **Body sequence**: Contains per-frame body mesh vertices `(N_frames, N_body_verts, 3)`
+- **Cloth sequence**: Contains per-frame cloth mesh vertices `(N_frames, N_cloth_verts, 3)`
+- **Cloth template**: OBJ file defining the cloth mesh topology (faces)
+
+### Configuration
+
+Edit `configs/mesh.yaml` to configure your training:
+
+#### Single Sequence Mode
+```yaml
+dataloader:
+  dataset:
+    mesh:
+      body_sequence_path: 'path/to/body_sequence.pkl'
+      cloth_sequence_path: 'path/to/cloth_sequence.pkl'
+      cloth_template_path: 'path/to/cloth_template.obj'
+      
+      n_coarse_levels: 3
+      lookup_steps: 5
+      noise_scale: 3e-3  # Position noise for data augmentation
+      wholeseq: false    # Set to true for validation mode
+```
+
+#### Multi-Sequence Mode (with datasplit CSV)
+```yaml
+dataloader:
+  dataset:
+    mesh:
+      data_root: 'vto_dataset_mesh'  # relative to $HOOD_DATA
+      split_path: 'datasplits/mesh_train.csv'  # relative to $HOOD_DATA/aux_data
+      
+      n_coarse_levels: 3
+      lookup_steps: 5
+      noise_scale: 3e-3
+      wholeseq: false
+```
+
+**Datasplit CSV format:**
+```csv
+id,garment,length
+tshirt_shape00_01_01,tshirt,300
+tshirt_shape00_01_02,tshirt,250
+dress_shape01_02_01,dress,400
+```
+
+Where:
+- `id`: Sequence identifier (used to construct file paths)
+- `garment`: Garment name (used for template lookup)
+- `length`: Number of frames in sequence
+
+File paths are constructed as:
+- Body: `{data_root}/body_sequence/{id}.pkl`
+- Cloth: `{data_root}/{garment}_sequence/{id}.pkl`
+
+### Run Training
+
+```bash
+python train_mesh.py
+```
+
+### Data Augmentation Limitations
+
+Since mesh mode uses pre-computed mesh sequences (not SMPL parameters), the following data augmentation methods are **NOT supported**:
+- Body shape variation
+- Body pose perturbation
+- Garment global rotation
+
+**Supported augmentation:**
+- Position noise injection (controlled by `noise_scale` parameter)
+
+---
+
+## Interactive Animation Viewer
+
+A GUI-based animation viewer for visualizing mesh sequences and inference results.
+
+### Features
+
+- Import multiple animation files simultaneously (pkl, hdf5, obj)
+- Play/pause animation with synchronized playback
+- Translate and adjust individual animations
+- Support for static meshes (displayed as first frame)
+
+### Supported File Formats
+
+| Format | Description |
+|--------|-------------|
+| `.pkl` | Mesh sequence, SMPL data, or inference output |
+| `.h5/.hdf5` | Mesh sequence or SMPL data |
+| `.obj` | Static mesh (displayed as single frame) |
+
+### Usage
+
+```bash
+# Run from project root
+python -m Tests.viewer.InteractiveAnimationViewer
+
+# Or set PYTHONPATH first
+$env:PYTHONPATH = "E:\Projects4\HOOD"  # PowerShell
+python Tests/viewer/InteractiveAnimationViewer.py
+```
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Space` | Play/Pause animation |
+| `.` | Next frame |
+| `,` | Previous frame |
+| `Ctrl+I` | Import files |
+| `Esc` | Quit |
+
+### GUI Operations
+
+1. **Import Animations**: `File -> Import Animations` or `Ctrl+I`
+2. **Manage Animations**: Use the Animation Manager panel to:
+   - Toggle visibility with checkboxes
+   - Select animation to edit properties
+   - Remove selected animation
+3. **Translate Animation**: Drag X/Y/Z sliders in the panel
+4. **Change Color**: Use the color picker for selected animation
+
+---
+
 ## Citation
 If you use this repository in your paper, please cite:
 ```
