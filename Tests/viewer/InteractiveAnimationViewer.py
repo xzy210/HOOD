@@ -40,6 +40,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Windows DLL 加载顺序问题修复
 from aitviewer.headless import HeadlessRenderer  # noqa: F401
 from aitviewer.renderables.meshes import Meshes
+from aitviewer.renderables.lines import Lines
+from aitviewer.renderables.spheres import Spheres
 from aitviewer.viewer import Viewer
 from matplotlib import pyplot as plt
 
@@ -69,7 +71,7 @@ class AnimationItem:
     """单个动画项的数据"""
     name: str                          # 显示名称
     data: SequenceData                 # 序列数据
-    meshes: List[Meshes] = field(default_factory=list)  # 渲染网格对象
+    meshes: List[Any] = field(default_factory=list)  # 渲染对象（Meshes 或 Lines）
     original_vertices: np.ndarray = None  # 原始顶点位置（用于平移）
     obstacle_original_vertices: np.ndarray = None  # 障碍物原始顶点
     translation: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))  # 平移量
@@ -83,6 +85,10 @@ class AnimationItem:
     @property
     def is_static(self) -> bool:
         return self.data.is_static
+    
+    @property
+    def is_skeleton(self) -> bool:
+        return self.data.is_skeleton
 
 
 # ============ 交互式动画查看器 ============
@@ -301,11 +307,22 @@ class InteractiveAnimationViewer(Viewer):
         print(f"  -> 成功: {name} ({data.n_frames} 帧, {data.n_vertices} 顶点)")
     
     def _create_meshes_for_item(self, item: AnimationItem):
-        """为动画项创建网格对象"""
+        """为动画项创建渲染对象（网格或线条）"""
         data = item.data
         
         # 根据最大帧数扩展顶点数据
         vertices = self._expand_vertices_to_max_frames(data.vertices, data.n_frames)
+        
+        if data.is_skeleton:
+            # 骨骼模式：使用 Lines 渲染边
+            self._create_skeleton_renderables(item, vertices)
+        else:
+            # 网格模式：使用 Meshes 渲染
+            self._create_mesh_renderables(item, vertices)
+    
+    def _create_mesh_renderables(self, item: AnimationItem, vertices: np.ndarray):
+        """创建网格渲染对象"""
+        data = item.data
         
         # 主网格
         color = adjust_color(item.color)
@@ -334,6 +351,55 @@ class InteractiveAnimationViewer(Viewer):
             obs_mesh.backface_culling = self.backface_culling
             item.meshes.append(obs_mesh)
             self.scene.add(obs_mesh)
+    
+    def _create_skeleton_renderables(self, item: AnimationItem, vertices: np.ndarray):
+        """
+        创建骨骼渲染对象（线条 + 顶点球体）
+        
+        :param item: 动画项
+        :param vertices: 顶点数据 [N, V, 3]
+        """
+        data = item.data
+        edges = data.edges
+        
+        # 构建线段数据：将边转换为线段顶点序列
+        # Lines 需要 [N, num_points, 3] 格式，使用 mode='lines' 时点排列为 [start0, end0, start1, end1, ...]
+        n_frames = vertices.shape[0]
+        n_edges = len(edges)
+        
+        # 创建线段顶点数组: [N, E*2, 3]
+        lines_vertices = np.zeros((n_frames, n_edges * 2, 3), dtype=np.float32)
+        for i, (start_idx, end_idx) in enumerate(edges):
+            lines_vertices[:, i * 2, :] = vertices[:, start_idx, :]      # start point
+            lines_vertices[:, i * 2 + 1, :] = vertices[:, end_idx, :]    # end point
+        
+        # 创建线条颜色
+        line_color = tuple(item.color[:3]) + (1.0,)
+        
+        # 创建 Lines 对象
+        lines = Lines(
+            lines_vertices,
+            r_base=0.003,  # 线条半径（3mm，适配米为单位的数据）
+            color=line_color,
+            mode='lines',  # 使用 lines 模式：0-1, 2-3, 4-5 成对绘制
+            name=f"{item.name}_edges"
+        )
+        item.meshes.append(lines)
+        self.scene.add(lines)
+        
+        # 可选：添加顶点球体标记
+        # 在关节位置绘制小球体
+        sphere_radius = 0.005  # 球体半径（5mm，适配米为单位的数据）
+        sphere_color = (1.0, 0.8, 0.2, 1.0)  # 金黄色
+        
+        spheres = Spheres(
+            vertices,
+            radius=sphere_radius,
+            color=sphere_color,
+            name=f"{item.name}_joints"
+        )
+        item.meshes.append(spheres)
+        self.scene.add(spheres)
     
     def _expand_vertices_to_max_frames(
         self, 
@@ -387,28 +453,56 @@ class InteractiveAnimationViewer(Viewer):
             self._apply_translation(item)
     
     def _apply_translation(self, item: AnimationItem):
-        """应用平移到动画项的网格"""
+        """应用平移到动画项的渲染对象"""
         translation = item.translation
         
-        # 主网格
-        if item.meshes:
-            main_mesh = item.meshes[0]
-            translated_vertices = item.original_vertices.copy()
-            translated_vertices = self._expand_vertices_to_max_frames(
-                translated_vertices, item.n_frames
-            )
-            translated_vertices += translation
-            main_mesh.vertices = translated_vertices
+        # 计算平移后的顶点
+        translated_vertices = item.original_vertices.copy()
+        translated_vertices = self._expand_vertices_to_max_frames(
+            translated_vertices, item.n_frames
+        )
+        translated_vertices += translation
         
-        # 障碍物网格
-        if len(item.meshes) > 1 and item.obstacle_original_vertices is not None:
-            obs_mesh = item.meshes[1]
-            obs_translated = item.obstacle_original_vertices.copy()
-            obs_translated = self._expand_vertices_to_max_frames(
-                obs_translated, item.n_frames
-            )
-            obs_translated += translation
-            obs_mesh.vertices = obs_translated
+        if item.is_skeleton:
+            # 骨骼模式：更新 Lines 和 Spheres
+            self._apply_skeleton_translation(item, translated_vertices)
+        else:
+            # 网格模式：更新 Meshes
+            if item.meshes:
+                item.meshes[0].vertices = translated_vertices
+            
+            # 障碍物网格
+            if len(item.meshes) > 1 and item.obstacle_original_vertices is not None:
+                obs_translated = item.obstacle_original_vertices.copy()
+                obs_translated = self._expand_vertices_to_max_frames(
+                    obs_translated, item.n_frames
+                )
+                obs_translated += translation
+                item.meshes[1].vertices = obs_translated
+    
+    def _apply_skeleton_translation(self, item: AnimationItem, translated_vertices: np.ndarray):
+        """应用平移到骨骼渲染对象"""
+        data = item.data
+        edges = data.edges
+        
+        # 更新 Lines
+        if len(item.meshes) > 0:
+            lines = item.meshes[0]
+            n_frames = translated_vertices.shape[0]
+            n_edges = len(edges)
+            
+            # 使用与创建时相同的格式: [N, E*2, 3]
+            lines_vertices = np.zeros((n_frames, n_edges * 2, 3), dtype=np.float32)
+            for i, (start_idx, end_idx) in enumerate(edges):
+                lines_vertices[:, i * 2, :] = translated_vertices[:, start_idx, :]
+                lines_vertices[:, i * 2 + 1, :] = translated_vertices[:, end_idx, :]
+            
+            lines.lines = lines_vertices
+        
+        # 更新 Spheres (使用 sphere_positions 而不是 positions)
+        if len(item.meshes) > 1:
+            spheres = item.meshes[1]
+            spheres.sphere_positions = translated_vertices
     
     def remove_item(self, index: int):
         """移除指定索引的动画项"""
@@ -594,6 +688,8 @@ class InteractiveAnimationViewer(Viewer):
                     label = f"{item.name} ({item.n_frames}f)"
                     if item.is_static:
                         label += " [static]"
+                    if item.is_skeleton:
+                        label += " [skeleton]"
                     
                     clicked, _ = imgui.selectable(label, is_selected)
                     if clicked:
@@ -616,6 +712,8 @@ class InteractiveAnimationViewer(Viewer):
                 # 信息
                 imgui.text_colored(f"Frames: {item.n_frames}", 0.7, 0.7, 0.7, 1.0)
                 imgui.text_colored(f"Vertices: {item.data.n_vertices}", 0.7, 0.7, 0.7, 1.0)
+                if item.is_skeleton and item.data.has_edges:
+                    imgui.text_colored(f"Edges: {len(item.data.edges)}", 0.7, 0.7, 0.7, 1.0)
                 
                 imgui.spacing()
                 
@@ -665,8 +763,11 @@ def main():
     print("=" * 50)
     print("\n支持的文件格式:")
     print("  - pkl (mesh_sequence, SMPL, inference output)")
-    print("  - h5/hdf5 (mesh_sequence, SMPL)")
+    print("  - h5/hdf5 (mesh_sequence, SMPL, skeleton_sequence)")
     print("  - obj (静态网格)")
+    print("\n骨骼序列格式 (skeleton_sequence):")
+    print("  - vertices: [N, V, 3] 顶点位置")
+    print("  - edges: [E, 2] 边连接索引")
     print("\n操作说明:")
     print("  - File -> Import Animations 导入动画文件")
     print("  - 在 Animation Manager 面板中管理动画")

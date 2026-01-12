@@ -95,13 +95,21 @@ class SequenceData:
     统一的序列数据容器
     
     所有加载器都将数据转换为此格式，实现数据格式的统一
+    支持两种渲染模式：
+    - mesh 模式：使用 faces（三角面）渲染
+    - skeleton 模式：使用 edges（边）渲染
     """
     vertices: np.ndarray  # [N, V, 3] 顶点位置序列
-    faces: np.ndarray     # [F, 3] 面索引
+    faces: np.ndarray     # [F, 3] 面索引（mesh模式）或 None
     
     # 可选的障碍物数据
     obstacle_vertices: Optional[np.ndarray] = None  # [N, V, 3]
     obstacle_faces: Optional[np.ndarray] = None     # [F, 3]
+    
+    # 骨骼/边数据（skeleton模式）
+    edges: Optional[np.ndarray] = None  # [E, 2] 边索引
+    bone_names: Optional[List[str]] = None  # [V,] 骨骼名称
+    dt: Optional[np.ndarray] = None  # [N,] 每帧时间间隔
     
     # 元数据
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -123,6 +131,16 @@ class SequenceData:
         """是否为静态网格（单帧）"""
         return self.n_frames == 1
     
+    @property
+    def is_skeleton(self) -> bool:
+        """是否为骨骼模式（使用edges而非faces）"""
+        return self.edges is not None and (self.faces is None or len(self.faces) == 0)
+    
+    @property
+    def has_edges(self) -> bool:
+        """是否有边数据"""
+        return self.edges is not None and len(self.edges) > 0
+    
     def repeat_to_frames(self, n_frames: int) -> 'SequenceData':
         """将静态网格重复为指定帧数的序列"""
         if self.n_frames == n_frames:
@@ -139,21 +157,35 @@ class SequenceData:
             faces=self.faces,
             obstacle_vertices=obstacle_vertices,
             obstacle_faces=self.obstacle_faces,
+            edges=self.edges,
+            bone_names=self.bone_names,
+            dt=self.dt,
             metadata={**self.metadata, 'repeated_from': self.n_frames, 'repeated_to': n_frames}
         )
     
     def summary(self) -> str:
         """返回数据摘要信息"""
-        type_str = "静态网格" if self.is_static else "动画序列"
+        if self.is_skeleton:
+            type_str = "骨骼序列" if not self.is_static else "静态骨骼"
+        else:
+            type_str = "静态网格" if self.is_static else "动画序列"
+        
         lines = [
             f"类型: {type_str}",
             f"帧数: {self.n_frames}",
             f"顶点数: {self.n_vertices}",
-            f"面数: {self.faces.shape[0]}",
         ]
+        
+        if self.faces is not None and len(self.faces) > 0:
+            lines.append(f"面数: {self.faces.shape[0]}")
+        
+        if self.has_edges:
+            lines.append(f"边数: {self.edges.shape[0]}")
+        
         if self.has_obstacle:
             lines.append(f"障碍物顶点: {self.obstacle_vertices.shape}")
             lines.append(f"障碍物面数: {self.obstacle_faces.shape[0]}")
+        
         return "\n".join(lines)
 
 
@@ -362,11 +394,13 @@ class HDF5SequenceLoader(SequenceLoader):
     支持格式：
     - Mesh HDF5: /vertices [N, V, 3], /faces [F, 3], /obstacle_vertices (可选), /obstacle_faces (可选)
     - SMPL HDF5: /body_pose [N, 69], /global_orient [N, 3], /transl [N, 3], /betas [10,]
+    - Skeleton HDF5: /vertices [N, V, 3], /edges [E, 2], /bone_names (可选), /dt (可选)
     """
     
     HDF5_EXTENSIONS = {'.h5', '.hdf5'}
     MESH_FORMAT = "mesh_sequence_hdf5"
     SMPL_FORMAT = "smpl_sequence_hdf5"
+    SKELETON_FORMAT = "skeleton_sequence"
     
     def __init__(self, smpl_config: SMPLConfig = None):
         self.smpl_config = smpl_config or SMPLConfig()
@@ -407,13 +441,20 @@ class HDF5SequenceLoader(SequenceLoader):
         
         with self._h5py.File(path, 'r') as f:
             hdf5_format = f.attrs.get('format', None)
+            if isinstance(hdf5_format, bytes):
+                hdf5_format = hdf5_format.decode('utf-8')
             
-            if hdf5_format == self.SMPL_FORMAT:
+            if hdf5_format == self.SKELETON_FORMAT:
+                return self._load_skeleton_hdf5(f, path)
+            elif hdf5_format == self.SMPL_FORMAT:
                 return self._load_smpl_hdf5(f, path)
             elif hdf5_format == self.MESH_FORMAT:
                 return self._load_mesh_hdf5(f, path)
             else:
-                if 'vertices' in f and 'faces' in f:
+                # 自动检测格式
+                if 'vertices' in f and 'edges' in f and 'faces' not in f:
+                    return self._load_skeleton_hdf5(f, path)
+                elif 'vertices' in f and 'faces' in f:
                     return self._load_mesh_hdf5(f, path)
                 elif 'body_pose' in f:
                     return self._load_smpl_hdf5(f, path)
@@ -456,6 +497,47 @@ class HDF5SequenceLoader(SequenceLoader):
             faces=faces,
             obstacle_vertices=obstacle_vertices,
             obstacle_faces=obstacle_faces,
+            metadata=metadata
+        )
+    
+    def _load_skeleton_hdf5(self, f, path: str) -> SequenceData:
+        """加载骨骼序列 HDF5 文件"""
+        vertices = np.array(f['vertices'], dtype=np.float32)
+        edges = np.array(f['edges'], dtype=np.int64)
+        
+        # 确保 vertices 是 [N, V, 3] 格式
+        if len(vertices.shape) == 2:
+            vertices = vertices[np.newaxis, ...]
+        
+        # 读取可选字段
+        bone_names = None
+        if 'bone_names' in f:
+            bone_names_raw = f['bone_names'][:]
+            bone_names = [
+                name.decode('utf-8') if isinstance(name, bytes) else name 
+                for name in bone_names_raw
+            ]
+        
+        dt = None
+        if 'dt' in f:
+            dt = np.array(f['dt'], dtype=np.float32)
+        
+        metadata = {
+            'source_format': 'hdf5_skeleton',
+            'path': path,
+            'filename': Path(path).name
+        }
+        
+        for key, value in f.attrs.items():
+            attr_value = value.decode('utf-8') if isinstance(value, bytes) else value
+            metadata[f'hdf5_{key}'] = attr_value
+        
+        return SequenceData(
+            vertices=vertices,
+            faces=np.array([], dtype=np.int64),  # 空的 faces
+            edges=edges,
+            bone_names=bone_names,
+            dt=dt,
             metadata=metadata
         )
     
