@@ -1,14 +1,14 @@
 """
 pkl_to_hdf5.py
-将 pkl 格式的动画序列转换为 hdf5 格式
+pkl 和 hdf5 格式动画序列相互转换
 
-支持的输入格式：
+支持的 pkl 输入格式：
 1. mesh_sequence: {'verts': [N, V, 3], 'faces': [F, 3]}
 2. 新 mesh_sequence: {'vertices': [N, V, 3], 'faces': [F, 3]}
 3. 推理输出: {'pred': [N, V, 3], 'cloth_faces': [F, 3], 'obstacle': ..., 'obstacle_faces': ...}
 4. SMPL 参数: {'body_pose': [N, 69], 'global_orient': [N, 3], 'transl': [N, 3], 'betas': [10,]}
 
-输出 HDF5 结构：
+HDF5 结构：
 - Mesh 格式:
     /vertices          [N, V, 3] float32
     /faces             [F, 3] int64
@@ -24,17 +24,19 @@ pkl_to_hdf5.py
     attrs: format, version, num_frames, source_path
 
 使用示例：
-    # 转换单个文件
+    # pkl -> hdf5
     python pkl_to_hdf5.py input.pkl
-    
-    # 指定输出路径
     python pkl_to_hdf5.py input.pkl -o output.h5
-    
-    # 批量转换目录下所有 pkl 文件
     python pkl_to_hdf5.py --batch input_dir/ --output-dir output_dir/
-    
-    # 使用压缩
     python pkl_to_hdf5.py input.pkl --compress
+    
+    # hdf5 -> pkl
+    python pkl_to_hdf5.py --to-pkl input.h5
+    python pkl_to_hdf5.py --to-pkl input.h5 -o output.pkl
+    python pkl_to_hdf5.py --to-pkl-batch input_dir/ --output-dir output_dir/
+    
+    # 查看 hdf5 文件信息
+    python pkl_to_hdf5.py --info file.h5
 """
 
 import argparse
@@ -45,11 +47,11 @@ from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
 
-# 设置项目路径
-PROJECT_ROOT = Path(__file__).parent.parent
+# 设置项目路径 (Tests/dataProcess -> Tests -> HOOD)
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.common import pickle_load
+from utils.common import pickle_load, pickle_dump
 
 # 检查 h5py 是否安装
 try:
@@ -379,6 +381,137 @@ def batch_convert(
     return success_count, fail_count
 
 
+# ============ HDF5 -> PKL 转换 ============
+
+def convert_hdf5_to_pkl(
+    input_path: str,
+    output_path: Optional[str] = None
+) -> str:
+    """
+    将 HDF5 文件转换为 pkl 格式
+    
+    :param input_path: 输入 HDF5 文件路径
+    :param output_path: 输出 pkl 文件路径（默认与输入同名，后缀改为 .pkl）
+    :return: 输出文件路径
+    """
+    input_path = Path(input_path)
+    
+    if not input_path.exists():
+        raise FileNotFoundError(f"输入文件不存在: {input_path}")
+    
+    if input_path.suffix.lower() not in ['.h5', '.hdf5']:
+        raise ValueError(f"输入文件必须是 .h5 或 .hdf5 格式: {input_path}")
+    
+    # 确定输出路径
+    if output_path is None:
+        output_path = input_path.with_suffix('.pkl')
+    output_path = Path(output_path)
+    
+    # 确保输出目录存在
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    print(f"转换: {input_path}")
+    
+    # 读取 HDF5 数据
+    with h5py.File(str(input_path), 'r') as f:
+        # 检测格式
+        file_format = f.attrs.get('format', '').decode() if isinstance(f.attrs.get('format', ''), bytes) else f.attrs.get('format', '')
+        
+        data = {}
+        
+        if file_format == HDF5Format.SMPL_FORMAT:
+            # SMPL 格式
+            data['body_pose'] = np.array(f['body_pose'])
+            data['global_orient'] = np.array(f['global_orient'])
+            data['transl'] = np.array(f['transl'])
+            data['betas'] = np.array(f['betas'])
+            print(f"  检测到格式: SMPL")
+            print(f"  已保存: {output_path}")
+            print(f"    - 帧数: {data['body_pose'].shape[0]}")
+            
+        else:
+            # Mesh 格式（默认）
+            data['vertices'] = np.array(f['vertices'])
+            data['faces'] = np.array(f['faces'])
+            
+            # 障碍物数据（如果存在）
+            if 'obstacle_vertices' in f:
+                data['obstacle_vertices'] = np.array(f['obstacle_vertices'])
+            if 'obstacle_faces' in f:
+                data['obstacle_faces'] = np.array(f['obstacle_faces'])
+            
+            print(f"  检测到格式: Mesh")
+            print(f"  已保存: {output_path}")
+            print(f"    - 帧数: {data['vertices'].shape[0]}")
+            print(f"    - 顶点数: {data['vertices'].shape[1]}")
+            print(f"    - 面数: {data['faces'].shape[0]}")
+            if 'obstacle_vertices' in data:
+                print(f"    - 障碍物: 是")
+    
+    # 保存为 pkl
+    pickle_dump(data, str(output_path))
+    
+    return str(output_path)
+
+
+def batch_convert_hdf5_to_pkl(
+    input_dir: str,
+    output_dir: Optional[str] = None,
+    recursive: bool = False
+) -> Tuple[int, int]:
+    """
+    批量将目录下的所有 HDF5 文件转换为 pkl 格式
+    
+    :param input_dir: 输入目录
+    :param output_dir: 输出目录（默认与输入目录相同）
+    :param recursive: 是否递归处理子目录
+    :return: (成功数, 失败数)
+    """
+    input_dir = Path(input_dir)
+    
+    if not input_dir.exists():
+        raise FileNotFoundError(f"输入目录不存在: {input_dir}")
+    
+    if output_dir is None:
+        output_dir = input_dir
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 查找所有 hdf5 文件
+    if recursive:
+        h5_files = list(input_dir.rglob("*.h5")) + list(input_dir.rglob("*.hdf5"))
+    else:
+        h5_files = list(input_dir.glob("*.h5")) + list(input_dir.glob("*.hdf5"))
+    
+    if not h5_files:
+        print(f"未找到 HDF5 文件: {input_dir}")
+        return 0, 0
+    
+    print(f"找到 {len(h5_files)} 个 HDF5 文件")
+    print("=" * 50)
+    
+    success_count = 0
+    fail_count = 0
+    
+    for h5_file in h5_files:
+        try:
+            # 计算相对路径以保持目录结构
+            rel_path = h5_file.relative_to(input_dir)
+            output_path = output_dir / rel_path.with_suffix('.pkl')
+            
+            convert_hdf5_to_pkl(str(h5_file), str(output_path))
+            success_count += 1
+        except Exception as e:
+            print(f"  转换失败: {h5_file}")
+            print(f"    错误: {e}")
+            fail_count += 1
+    
+    print("=" * 50)
+    print(f"转换完成: 成功 {success_count}, 失败 {fail_count}")
+    
+    return success_count, fail_count
+
+
 # ============ HDF5 文件信息查看 ============
 
 def show_hdf5_info(file_path: str) -> None:
@@ -415,27 +548,27 @@ def show_hdf5_info(file_path: str) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='将 pkl 格式的动画序列转换为 HDF5 格式',
+        description='pkl 和 hdf5 格式动画序列相互转换',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 转换单个文件
+  # pkl -> hdf5: 转换单个文件
   python pkl_to_hdf5.py input.pkl
-  
-  # 指定输出路径
   python pkl_to_hdf5.py input.pkl -o output.h5
-  
-  # 使用压缩
   python pkl_to_hdf5.py input.pkl --compress
   
-  # 批量转换
+  # pkl -> hdf5: 批量转换
   python pkl_to_hdf5.py --batch input_dir/
-  
-  # 批量转换到指定目录
   python pkl_to_hdf5.py --batch input_dir/ --output-dir output_dir/
-  
-  # 递归批量转换
   python pkl_to_hdf5.py --batch input_dir/ --recursive
+  
+  # hdf5 -> pkl: 转换单个文件
+  python pkl_to_hdf5.py --to-pkl input.h5
+  python pkl_to_hdf5.py --to-pkl input.h5 -o output.pkl
+  
+  # hdf5 -> pkl: 批量转换
+  python pkl_to_hdf5.py --to-pkl-batch input_dir/
+  python pkl_to_hdf5.py --to-pkl-batch input_dir/ --output-dir output_dir/
   
   # 查看 HDF5 文件信息
   python pkl_to_hdf5.py --info file.h5
@@ -447,25 +580,25 @@ def parse_args():
         type=str,
         nargs='?',
         default=None,
-        help='输入 pkl 文件路径'
+        help='输入 pkl 文件路径 (pkl -> hdf5)'
     )
     parser.add_argument(
         '-o', '--output',
         type=str,
         default=None,
-        help='输出 HDF5 文件路径（默认与输入同名）'
+        help='输出文件路径（默认与输入同名，后缀自动更改）'
     )
     parser.add_argument(
         '--compress', '-c',
         action='store_true',
-        help='启用 gzip 压缩'
+        help='启用 gzip 压缩 (仅 pkl -> hdf5)'
     )
     parser.add_argument(
         '--batch', '-b',
         type=str,
         default=None,
         metavar='DIR',
-        help='批量转换目录下的所有 pkl 文件'
+        help='批量转换目录下的所有 pkl 文件 (pkl -> hdf5)'
     )
     parser.add_argument(
         '--output-dir',
@@ -486,6 +619,22 @@ def parse_args():
         help='显示 HDF5 文件信息'
     )
     
+    # hdf5 -> pkl 参数
+    parser.add_argument(
+        '--to-pkl',
+        type=str,
+        default=None,
+        metavar='H5_FILE',
+        help='将 HDF5 文件转换为 pkl 格式'
+    )
+    parser.add_argument(
+        '--to-pkl-batch',
+        type=str,
+        default=None,
+        metavar='DIR',
+        help='批量将目录下的 HDF5 文件转换为 pkl 格式'
+    )
+    
     return parser.parse_args()
 
 
@@ -497,7 +646,21 @@ def main():
         show_hdf5_info(args.info)
         return
     
-    # 批量转换模式
+    # hdf5 -> pkl: 单文件转换
+    if args.to_pkl:
+        convert_hdf5_to_pkl(args.to_pkl, args.output)
+        return
+    
+    # hdf5 -> pkl: 批量转换
+    if args.to_pkl_batch:
+        batch_convert_hdf5_to_pkl(
+            args.to_pkl_batch,
+            args.output_dir,
+            recursive=args.recursive
+        )
+        return
+    
+    # pkl -> hdf5: 批量转换
     if args.batch:
         batch_convert(
             args.batch,
@@ -507,9 +670,11 @@ def main():
         )
         return
     
-    # 单文件转换模式
+    # pkl -> hdf5: 单文件转换
     if args.input is None:
-        print("错误: 请提供输入文件路径或使用 --batch 进行批量转换")
+        print("错误: 请提供输入文件路径")
+        print("  pkl -> hdf5: python pkl_to_hdf5.py input.pkl")
+        print("  hdf5 -> pkl: python pkl_to_hdf5.py --to-pkl input.h5")
         print("使用 --help 查看帮助")
         sys.exit(1)
     
