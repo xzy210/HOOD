@@ -39,6 +39,17 @@
         - dt: [N,] 每帧的时间间隔
         - vertices: [N, V, 3] 顶点位置序列
         - faces: [F, 3] 三角面索引
+
+Surfaces 数据处理:
+    对于 Struct 文件中的 /Surfaces 组，每个 Surface 包含：
+        - anim_node_uid: AnimNode 的 GUID
+        - faces: [N, 3] 三角形，每个三角形记录3个骨骼名称
+        - root_bone_names: [M] 根骨骼名称列表
+    
+    输出文件：
+        - surface_<NodeClass>_<uid>.hdf5: Surface mesh 动画序列
+        - surface_<NodeClass>_<uid>_ref.obj: 参考姿态静态网格（基于 ref_bone_poses_cs）
+        - surface_<NodeClass>_<uid>_roots.txt: 根顶点索引列表
 """
 
 import h5py
@@ -97,6 +108,27 @@ def _decode_string_array(arr: np.ndarray) -> list:
     if arr.dtype == object:
         return [name.decode('utf-8') if isinstance(name, bytes) else name for name in arr]
     return list(arr)
+
+
+def _decode_string_array_2d(arr: np.ndarray) -> list:
+    """将二维字符串数组从bytes解码为str列表的列表"""
+    result = []
+    for row in arr:
+        if isinstance(row, (list, np.ndarray)):
+            decoded_row = []
+            for item in row:
+                if isinstance(item, bytes):
+                    decoded_row.append(item.decode('utf-8'))
+                else:
+                    decoded_row.append(str(item) if not isinstance(item, str) else item)
+            result.append(decoded_row)
+        else:
+            # 单个元素
+            if isinstance(row, bytes):
+                result.append(row.decode('utf-8'))
+            else:
+                result.append(str(row) if not isinstance(row, str) else row)
+    return result
 
 
 def load_struct_data(struct_file: str) -> dict:
@@ -177,6 +209,25 @@ def load_struct_data(struct_file: str) -> dict:
                 'triangles': np.array(f['BodyMeshSkinData/triangles'][:], dtype=np.int32),
                 'inv_bind_matrices': np.array(f['BodyMeshSkinData/inv_bind_matrices'][:], dtype=np.float32),
             }
+        
+        # 读取 Surfaces 数据（如果存在）
+        if 'Surfaces' in f:
+            surfaces = []
+            surfaces_group = f['Surfaces']
+            # 遍历所有 Surface 子组（按数字索引）
+            surface_keys = sorted([k for k in surfaces_group.keys() if k.isdigit()], key=int)
+            for key in surface_keys:
+                surface_group = surfaces_group[key]
+                surface_data = {
+                    'anim_node_uid': surface_group['anim_node_uid'][()].decode('utf-8') 
+                        if isinstance(surface_group['anim_node_uid'][()], bytes) 
+                        else str(surface_group['anim_node_uid'][()]),
+                    # faces 可能不存在（ribbon 类型节点没有三角面）
+                    'faces': _decode_string_array_2d(surface_group['faces'][:]) if 'faces' in surface_group else [],
+                    'root_bone_names': _decode_string_array(surface_group['root_bone_names'][:]),
+                }
+                surfaces.append(surface_data)
+            result['surfaces'] = surfaces
     
     return result
 
@@ -660,6 +711,100 @@ def save_mesh_obj(output_file: str, vertices: np.ndarray, faces: np.ndarray,
             f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
 
 
+def process_surface_data(surface: dict, ref_skeleton: dict) -> dict:
+    """
+    处理单个 Surface 数据，将骨骼名称转换为顶点索引
+    
+    Args:
+        surface: Surface 数据字典，包含 faces（骨骼名称）和 root_bone_names
+        ref_skeleton: RefSkeleton 数据字典，包含 bone_names 和 ref_bone_poses_cs
+        
+    Returns:
+        处理后的数据字典，包含：
+        - bone_names: 该 Surface 使用的唯一骨骼名称列表（作为顶点）
+        - bone_indices: 骨骼在 RefSkeleton 中的索引
+        - faces: [F, 3] 三角面索引（相对于 bone_names）
+        - root_vertex_indices: root_bone_names 对应的顶点索引列表
+    """
+    faces_bone_names = surface['faces']  # [N, 3] 骨骼名称数组
+    root_bone_names = surface['root_bone_names']
+    
+    ref_bone_names = ref_skeleton['bone_names']
+    ref_name_to_idx = {name: idx for idx, name in enumerate(ref_bone_names)}
+    
+    # 收集所有唯一的骨骼名称
+    unique_bones = []
+    bone_set = set()
+    for face in faces_bone_names:
+        for bone_name in face:
+            if bone_name not in bone_set:
+                bone_set.add(bone_name)
+                unique_bones.append(bone_name)
+    
+    # 创建骨骼名称到顶点索引的映射
+    bone_to_vertex_idx = {name: idx for idx, name in enumerate(unique_bones)}
+    
+    # 获取每个骨骼在 RefSkeleton 中的索引
+    bone_indices = []
+    for bone_name in unique_bones:
+        if bone_name in ref_name_to_idx:
+            bone_indices.append(ref_name_to_idx[bone_name])
+        else:
+            print(f"  警告: 骨骼 '{bone_name}' 不在 RefSkeleton 中")
+            bone_indices.append(-1)
+    bone_indices = np.array(bone_indices, dtype=np.int32)
+    
+    # 将 faces 从骨骼名称转换为顶点索引
+    faces = []
+    for face in faces_bone_names:
+        face_indices = [bone_to_vertex_idx[name] for name in face]
+        faces.append(face_indices)
+    faces = np.array(faces, dtype=np.int32)
+    
+    # 将 root_bone_names 转换为顶点索引
+    root_vertex_indices = []
+    for root_name in root_bone_names:
+        if root_name in bone_to_vertex_idx:
+            root_vertex_indices.append(bone_to_vertex_idx[root_name])
+        else:
+            print(f"  警告: 根骨骼 '{root_name}' 不在该 Surface 的顶点中")
+    
+    return {
+        'bone_names': unique_bones,
+        'bone_indices': bone_indices,
+        'faces': faces,
+        'root_vertex_indices': root_vertex_indices
+    }
+
+
+def save_root_vertices_txt(output_file: str, root_vertex_indices: list, bone_names: list = None):
+    """
+    保存 root 顶点索引到 txt 文件
+    
+    Args:
+        output_file: 输出文件路径
+        root_vertex_indices: root 顶点索引列表
+        bone_names: 可选，骨骼名称列表（用于注释）
+    """
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_file, 'w') as f:
+        f.write(f"# Root vertex indices\n")
+        f.write(f"# Total: {len(root_vertex_indices)}\n")
+        if bone_names:
+            f.write(f"# Format: vertex_index bone_name\n\n")
+            for idx in root_vertex_indices:
+                if 0 <= idx < len(bone_names):
+                    f.write(f"{idx} {bone_names[idx]}\n")
+                else:
+                    f.write(f"{idx}\n")
+        else:
+            f.write(f"# Format: vertex_index\n\n")
+            for idx in root_vertex_indices:
+                f.write(f"{idx}\n")
+
+
 def merge_and_save(struct_file: str, trajectory_file: str, output_file: str, coord_system: str = 'none'):
     """
     合并struct和trajectory数据并保存到新的h5文件（仅 DynamicJoints）
@@ -767,6 +912,14 @@ def merge_and_save_split(struct_file: str, trajectory_file: str, output_dir: str
         body_mesh_skin = struct_data['body_mesh_skin_data']
         print(f"  Body 网格顶点数: {body_mesh_skin['ref_vertices'].shape[0]}")
         print(f"  Body 网格三角面数: {len(body_mesh_skin['triangles']) // 3}")
+    
+    if 'surfaces' in struct_data:
+        print(f"  Surfaces 数量: {len(struct_data['surfaces'])}")
+        for i, surface in enumerate(struct_data['surfaces']):
+            uid_short = surface['anim_node_uid'][:6] if len(surface['anim_node_uid']) >= 6 else surface['anim_node_uid']
+            num_faces = len(surface['faces'])
+            num_roots = len(surface['root_bone_names'])
+            print(f"    Surface {i}: uid={uid_short}, faces={num_faces}, roots={num_roots}")
     
     print(f"\n正在读取trajectory文件: {trajectory_file}")
     trajectory_data = load_trajectory_data(trajectory_file, num_ref_bones, num_body_ref_bones)
@@ -1017,6 +1170,111 @@ def merge_and_save_split(struct_file: str, trajectory_file: str, output_dir: str
         
         print(f"    {filename}")
         print(f"      顶点: {len(body_ref_vertices)}, 面: {len(body_faces)}")
+    
+    # ============================================
+    # 6. 输出 Surface mesh 动画和静态 OBJ
+    # ============================================
+    has_surfaces = 'surfaces' in struct_data and len(struct_data['surfaces']) > 0
+    
+    if has_surfaces and has_ref_skeleton:
+        print("\n[6] 输出 Surface mesh 数据...")
+        ref_skeleton = struct_data['ref_skeleton']
+        ref_bone_poses_cs = ref_skeleton.get('ref_bone_poses_cs')
+        
+        for i, surface in enumerate(struct_data['surfaces']):
+            uid = surface['anim_node_uid']
+            uid_short = uid[:6] if len(uid) >= 6 else uid
+            
+            # 查找对应的 node_class
+            node_class = "Surface"
+            if 'anim_node_uids' in struct_data:
+                for j, anim_uid in enumerate(struct_data['anim_node_uids']):
+                    if anim_uid == uid:
+                        node_class = struct_data['node_classes'][j]
+                        break
+            
+            safe_class_name = node_class.replace('/', '_').replace('\\', '_').replace('::', '_')
+            
+            # 检查是否有 faces 数据（ribbon 类型可能没有）
+            if len(surface['faces']) == 0:
+                print(f"    跳过 Surface {i} ({node_class}, uid={uid_short}): 无三角面数据")
+                continue
+            
+            # 处理 Surface 数据
+            processed = process_surface_data(surface, ref_skeleton)
+            
+            if len(processed['faces']) == 0:
+                print(f"    跳过 Surface {i} ({node_class}, uid={uid_short}): 处理后无有效三角面")
+                continue
+            
+            bone_names = processed['bone_names']
+            bone_indices = processed['bone_indices']
+            faces = processed['faces']
+            root_vertex_indices = processed['root_vertex_indices']
+            
+            print(f"    Surface {i}: {node_class} (uid={uid_short})")
+            print(f"      顶点: {len(bone_names)}, 面: {len(faces)}, 根顶点: {len(root_vertex_indices)}")
+            
+            # 6.1 输出动画 mesh (H5)
+            # 从全骨骼轨迹中提取该 Surface 使用的骨骼位置
+            valid_bone_mask = bone_indices >= 0
+            if not np.all(valid_bone_mask):
+                print(f"      警告: 有 {np.sum(~valid_bone_mask)} 个骨骼不在 RefSkeleton 中，跳过动画输出")
+            else:
+                # 提取顶点位置序列 [N, V, 3]
+                surface_vertices = positions[:, bone_indices, :]
+                
+                # 输出文件名
+                if prefix:
+                    filename = f"{prefix}_surface_{safe_class_name}_{uid_short}.hdf5"
+                else:
+                    filename = f"surface_{safe_class_name}_{uid_short}.hdf5"
+                output_file = output_path / filename
+                
+                save_mesh_h5(str(output_file), dt, surface_vertices, faces, coord_system)
+                output_count += 1
+                print(f"      动画: {filename}")
+            
+            # 6.2 输出静态 OBJ（基于 ref_bone_poses_cs）
+            if ref_bone_poses_cs is not None and np.all(valid_bone_mask):
+                # ref_bone_poses_cs 的形状应该是 [B, 3] 或 [B, 4, 4]
+                if ref_bone_poses_cs.ndim == 2 and ref_bone_poses_cs.shape[1] == 3:
+                    # [B, 3] 格式：直接是位置
+                    ref_vertices = ref_bone_poses_cs[bone_indices]
+                elif ref_bone_poses_cs.ndim == 2 and ref_bone_poses_cs.shape[1] >= 3:
+                    # 可能是 [B, 7] 或其他格式，取前3列作为位置
+                    ref_vertices = ref_bone_poses_cs[bone_indices, :3]
+                else:
+                    print(f"      警告: ref_bone_poses_cs 格式不支持: {ref_bone_poses_cs.shape}")
+                    ref_vertices = None
+                
+                if ref_vertices is not None:
+                    # 输出文件名
+                    if prefix:
+                        filename = f"{prefix}_surface_{safe_class_name}_{uid_short}_ref.obj"
+                    else:
+                        filename = f"surface_{safe_class_name}_{uid_short}_ref.obj"
+                    output_file = output_path / filename
+                    
+                    save_mesh_obj(str(output_file), ref_vertices, faces, coord_system)
+                    output_count += 1
+                    print(f"      静态OBJ: {filename}")
+            elif ref_bone_poses_cs is None:
+                print(f"      跳过静态OBJ: 缺少 ref_bone_poses_cs 数据")
+            
+            # 6.3 输出 root vertices txt
+            if len(root_vertex_indices) > 0:
+                if prefix:
+                    filename = f"{prefix}_surface_{safe_class_name}_{uid_short}_roots.txt"
+                else:
+                    filename = f"surface_{safe_class_name}_{uid_short}_roots.txt"
+                output_file = output_path / filename
+                
+                save_root_vertices_txt(str(output_file), root_vertex_indices, bone_names)
+                output_count += 1
+                print(f"      根顶点: {filename}")
+    elif has_surfaces and not has_ref_skeleton:
+        print("\n[6] 跳过 Surface mesh（缺少 RefSkeleton 数据）")
     
     print("\n" + "=" * 60)
     print(f"处理完成！共输出 {output_count} 个文件到: {output_dir}")
