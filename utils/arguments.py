@@ -72,6 +72,36 @@ def load_module(module_type: str, module_config: DictConfig, module_name: str = 
     return module
 
 
+def load_config_with_defaults(config_path: str, config_dir: str):
+    """
+    Load a config file and recursively merge any defaults it specifies.
+    
+    :param config_path: path to the config file
+    :param config_dir: root directory for resolving relative default paths
+    :return: merged OmegaConf config
+    """
+    conf_file = OmegaConf.load(config_path)
+    OmegaConf.set_struct(conf_file, False)
+    
+    # Check if config has defaults to inherit from
+    if 'defaults' in conf_file:
+        defaults_list = conf_file.defaults
+        del conf_file['defaults']  # Remove defaults key before merging
+        
+        # Load and merge each default config (in order)
+        merged_defaults = OmegaConf.create({})
+        for default_name in defaults_list:
+            default_path = os.path.join(config_dir, default_name + '.yaml')
+            # Recursively load defaults (supports nested inheritance)
+            default_conf = load_config_with_defaults(default_path, config_dir)
+            merged_defaults = OmegaConf.merge(merged_defaults, default_conf)
+        
+        # Merge current config on top of defaults
+        conf_file = OmegaConf.merge(merged_defaults, conf_file)
+    
+    return conf_file
+
+
 def load_params(config_name: str=None, config_dir: str=None):
     """
     Build OmegaConf config and the modules from the config file.
@@ -94,12 +124,11 @@ def load_params(config_name: str=None, config_dir: str=None):
         config_name = conf_cli.config
         conf = OmegaConf.merge(conf, conf_cli)
 
-    # Load config file and merge it in
+    # Load config file (with defaults inheritance support) and merge it in
     conf['config'] = config_name
     config_path = os.path.join(config_dir, config_name + '.yaml')
-    conf_file = OmegaConf.load(config_path)
+    conf_file = load_config_with_defaults(config_path, str(config_dir))
     OmegaConf.set_struct(conf, False)
-    OmegaConf.set_struct(conf_file, False)
     conf = OmegaConf.merge(conf, conf_file)
 
     # Load modules from config

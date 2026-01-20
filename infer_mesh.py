@@ -142,8 +142,8 @@ def main():
     
     # 创建模型和Runner
     model = load_module('models', CONFIG.model).create(CONFIG.model.postcvpr)
-    from runners.mesh import Runner
-    runner = Runner(model, {}, CONFIG.runner.mesh)
+    from runners.postcvpr import Runner
+    runner = Runner(model, {}, CONFIG.runner.postcvpr)
     runner.to(device)
     
     # 加载权重

@@ -1,15 +1,55 @@
 import os
+from datetime import datetime
 
 import numpy as np
 import torch
 
 from utils.arguments import load_params, create_modules
+from utils.defaults import DEFAULTS
+
+# Optional TensorBoard support
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    SummaryWriter = None
+    TENSORBOARD_AVAILABLE = False
+
+
+def create_tensorboard_writer(log_dir: str, experiment_name: str = None):
+    """
+    Create a TensorBoard SummaryWriter.
+    
+    Args:
+        log_dir: Directory to save TensorBoard logs
+        experiment_name: Name of the experiment (for display)
+    
+    Returns:
+        SummaryWriter or None if TensorBoard is not available
+    """
+    if not TENSORBOARD_AVAILABLE:
+        print("[TensorBoard] WARNING: tensorboard is not installed. Install with 'pip install tensorboard'")
+        print("[TensorBoard] Training will continue without TensorBoard logging.")
+        return None
+    
+    if experiment_name is None:
+        experiment_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    tensorboard_dir = os.path.join(log_dir, 'tensorboard')
+    os.makedirs(tensorboard_dir, exist_ok=True)
+    
+    writer = SummaryWriter(log_dir=tensorboard_dir)
+    print(f"[TensorBoard] Logs will be saved to: {tensorboard_dir}")
+    print(f"[TensorBoard] Run 'tensorboard --logdir={os.path.dirname(tensorboard_dir)}' to visualize")
+    
+    return writer
 
 
 def main():
     os.environ['OMP_NUM_THREADS'] = '1'
     os.environ['MKL_NUM_THREADS'] = '1'
     torch.set_num_threads(1)
+    
     modules, config = load_params()
     dataloader_m, runner, training_module, aux_modules = create_modules(modules, config)
 
@@ -30,18 +70,31 @@ def main():
     if config.detect_anomaly:
         torch.autograd.set_detect_anomaly(True)
 
+    # Setup run directory and TensorBoard
+    now = datetime.now()
+    dt_string = now.strftime("%Y%m%d_%H%M%S")
+    exp_name = config.experiment.name if config.experiment.name else dt_string
+    
+    run_dir = os.path.join(DEFAULTS.experiment_root, exp_name, dt_string)
+    config.run_dir = run_dir
+    
+    writer = create_tensorboard_writer(run_dir, exp_name)
 
     global_step = config.step_start
 
     torch.manual_seed(57)
     np.random.seed(57)
+    
     for i in range(config.experiment.n_epochs):
         dataloader = dataloader_m.create_dataloader()
         global_step = runner.run_epoch(training_module, aux_modules, dataloader, i, config,
-                                       global_step=global_step)
+                                       global_step=global_step, writer=writer)
 
         if config.experiment.max_iter is not None and global_step > config.experiment.max_iter:
             break
+
+    if writer is not None:
+        writer.close()
 
 
 if __name__ == '__main__':
