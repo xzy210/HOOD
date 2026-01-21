@@ -10,9 +10,12 @@ defaults:
 
 experiment:
   name: mesh_training
+  checkpoint_path: 'hood_data/experiments/20251203_120152/checkpoints/step_0000060000.pth'
   save_checkpoint_every: 2000
   n_epochs: 100000
-  max_iter: 60000
+  max_iter: 70000
+
+step_start: 60000
 
 dataloader:
   num_workers: 0
@@ -22,9 +25,9 @@ dataloader:
       # ============================================
       # Option 1: Single sequence mode
       # ============================================
-      body_sequence_path: 'Tests/data/vto_dataset_mesh/body_sequence/tshirt_shape00_01_01.pkl'
-      cloth_sequence_path: 'Tests/data/vto_dataset_mesh/tshirt_sequence/tshirt_shape00_01_01.pkl'
-      cloth_template_path: 'Tests/data/tshirt.obj'
+      body_sequence_path: 'hood_data/EcoData/split_output/body_skinned_mesh_flipped.pkl'
+      cloth_sequence_path: 'hood_data/EcoData/split_output/surface_LayeredClothing_A0F407.pkl'
+      cloth_template_path: 'hood_data/EcoData/split_output/surface_LayeredClothing_A0F407_ref.pkl'
       
       # ============================================
       # Option 2: Multi-sequence mode (uncomment to use)
@@ -39,7 +42,7 @@ dataloader:
       n_coarse_levels: 3
       lookup_steps: 5
       noise_scale: 3e-3  # Position noise for data augmentation
-      pinned_verts: false  # Whether to use pinned vertices
+      pinned_verts: true  # Whether to use pinned vertices
       wholeseq: false  # Set to true for validation mode
 
 # ============================================

@@ -17,9 +17,10 @@ from utils.arguments import load_module
 
 # ============ 默认参数配置 ============
 DEFAULT_PATHS = {
-    'checkpoint': 'hood_data/experiments/20251203_120152/checkpoints/step_0000060000.pth',
-    # 'body': 'hood_data/EcoData/split_output/body_skinned_mesh.pkl',
-    'body': '',
+    # 'checkpoint': 'hood_data/experiments/20251203_120152/checkpoints/step_0000060000.pth',
+    'checkpoint': 'hood_data/experiments/mesh_training/20260121_162215/checkpoints/step_0000070000.pth',
+    'body': 'hood_data/EcoData/split_output/body_skinned_mesh_flipped.pkl',
+    # 'body': '',
     'cloth': 'hood_data/EcoData/split_output/surface_LayeredClothing_A0F407.pkl',
     'template': 'hood_data/EcoData/split_output/surface_LayeredClothing_A0F407_ref.obj',
     'output': 'hood_data/temp/output_eco_data.pkl',

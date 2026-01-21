@@ -338,9 +338,19 @@ class MeshLoader:
         vertex_level = np.zeros((n_verts, 1), dtype=np.int64)
         for i in range(self.mcfg.n_coarse_levels):
             key = f'coarse_edge{i}'
-            edges_coarse = coarse_edges_dict[i].astype(np.int64)
+            edges_coarse = coarse_edges_dict[i]
+            edges_coarse = np.array(edges_coarse, dtype=np.int64)
+            
+            # 确保 edges_coarse 是 2D 数组 [N, 2]
+            if edges_coarse.ndim == 1:
+                if len(edges_coarse) == 0:
+                    edges_coarse = np.zeros((0, 2), dtype=np.int64)
+                else:
+                    edges_coarse = edges_coarse.reshape(-1, 2)
+            
             # Make bidirectional
-            edges_coarse = np.concatenate([edges_coarse, edges_coarse[:, [1, 0]]], axis=0)
+            if edges_coarse.shape[0] > 0:
+                edges_coarse = np.concatenate([edges_coarse, edges_coarse[:, [1, 0]]], axis=0)
             sample['cloth', key, 'cloth'].edge_index = torch.tensor(edges_coarse.T)
             
             # Update vertex level
@@ -537,7 +547,16 @@ class MeshDataset:
         
         # Load sequence to get frame count
         body_data = pickle_load(self.body_path)
-        self.n_frames = body_data['num_frames']
+        
+        # 支持两种方式获取帧数：
+        # 1. 直接从 'num_frames' 字段读取
+        # 2. 从 'vertices' 数组形状推断 [N, V, 3]
+        if 'num_frames' in body_data:
+            self.n_frames = body_data['num_frames']
+        elif 'vertices' in body_data:
+            self.n_frames = body_data['vertices'].shape[0]
+        else:
+            raise KeyError("Body data must contain 'num_frames' or 'vertices' field")
         
         # Extract garment name from path
         cloth_basename = os.path.basename(cloth_path)
